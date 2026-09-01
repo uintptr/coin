@@ -1,11 +1,15 @@
 # Project State
 
-Working memory for coin. `PROJECT_SPECS.md` is the design and does not change
-often; this file tracks where the work actually is and is updated as it moves.
+**This file is the project's memory.** It is the first thing to read when
+picking the work up, and the last thing to update before finishing a session.
+`PROJECT_SPECS.md` holds the design and changes rarely; this file tracks where
+the work actually is and is expected to change constantly.
 
 **Last updated:** 2026-08-31
-**Build order position:** steps 1-4 complete, step 5 is next
-**Head:** `07ef37d`, working tree clean, `main` level with `origin/main`
+**Build order position:** steps 1-4 complete; step 5 is next
+
+Deliberately no commit hash here — git already knows it, and a hash copied into
+prose is stale the moment the next commit lands.
 
 ## Where we are
 
@@ -13,7 +17,8 @@ The opencode integration is built and proven end to end. **No debate logic
 exists yet.** The only command is `probe`, a diagnostic that sends one prompt to
 one session; it is not a debate and was never meant to be one. Its purpose was
 to de-risk the one part of the design with real unknowns before building on top
-of it, and it earned its keep by surfacing five upstream surprises.
+of it, and it earned its keep: every upstream surprise listed below came out of
+building and running it.
 
 ## Done
 
@@ -152,5 +157,25 @@ Before committing: `cargo test`, `cargo clippy --all-targets -- -D warnings`,
   same change that acts on it, whether the user stated it, we reached it
   together, or an upstream discovery forced it. A decision that lives only in a
   conversation is lost when the session ends.
-- Keep this file current as work moves: mark steps done, record new open
-  questions, and keep "Next session: start here" pointing at the real next task.
+
+## Updating this file
+
+Update it **in the same commit as the work it describes**, not as a separate
+tidying pass later. A memory file maintained retroactively is a memory file that
+is usually wrong.
+
+What to touch, and when:
+
+| Trigger | Update |
+|---|---|
+| A build-order step finishes | Move it from "Not done" to "Done"; rewrite "Next session: start here" for the new next step |
+| A design decision is made | `PROJECT_SPECS.md` first, then note here only if it changes what is left to build |
+| An upstream dependency surprises us | Add to "Upstream facts", with the detail in `PROJECT_SPECS.md` section 5 |
+| A question is raised that is not answered now | Add to "Open questions", saying what it blocks |
+| A question gets answered | Delete it from "Open questions" — resolved items are noise |
+| A command, flag, or test workflow changes | Update "Running it" |
+| Any of the above | Bump "Last updated" |
+
+Two habits that keep it honest: prefer deleting stale content over accumulating
+it, and keep "Next session: start here" specific enough to act on without
+rereading the code. If a section is no longer true, it is worse than absent.
