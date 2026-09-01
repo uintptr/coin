@@ -381,10 +381,9 @@ fn print_turn_analysis(turn: &coin::debate::state::Turn) {
 fn print_summary(state: &DebateState) {
     println!("\n{}", paint(Style::Heading, "Result"));
 
-    let series_a = state.credence_series(Side::A);
-    let series_b = state.credence_series(Side::B);
+    let rows = state.credence_rounds();
 
-    if !series_a.is_empty() || !series_b.is_empty() {
+    if !rows.is_empty() {
         // Each side reports confidence in its own position, so the gap column
         // restates them on a single proposition. Without it, two sides that
         // fully agree look maximally far apart.
@@ -395,27 +394,42 @@ fn print_summary(state: &DebateState) {
                 "confidence in own position, and how far apart that leaves them:"
             )
         );
-        for round in 0..series_a.len().max(series_b.len()) {
-            let format_value = |series: &[Credence]| {
-                series
-                    .get(round)
-                    .map_or_else(|| "  -".to_string(), |value| format!("{value:>3}"))
+        for row in &rows {
+            let cell = |value: Option<Credence>| {
+                value.map_or_else(|| "  -".to_string(), |credence| format!("{credence:>3}"))
             };
-            let gap = match (series_a.get(round), series_b.get(round)) {
-                (Some(a), Some(b)) => format!("{:>3}", Credence::agreement_gap(*a, *b)),
-                _ => "  -".to_string(),
-            };
+            let gap = row
+                .gap()
+                .map_or_else(|| "  -".to_string(), |gap| format!("{gap:>3}"));
             println!(
                 "  round {}   {} {}   {} {}   {} {}",
-                round + 1,
+                row.round,
                 paint(Style::SideA, "A"),
-                format_value(&series_a),
+                cell(row.a),
                 paint(Style::SideB, "B"),
-                format_value(&series_b),
+                cell(row.b),
                 paint(Style::Dim, "gap"),
                 paint(Style::Value, gap),
             );
         }
+    }
+
+    // A debate can complete with most of its structure unreadable, which
+    // silently weakens every number above. Say so rather than letting a
+    // sparse table look like a short debate.
+    let unreadable = state.unreadable_turns();
+    if unreadable > 0 {
+        println!(
+            "{}",
+            paint(
+                Style::Value,
+                format!(
+                    "caution: {unreadable} of {} turns produced no readable \
+                     structured block, so the table omits them",
+                    state.turns.len()
+                )
+            )
+        );
     }
 
     println!("ended: {}", store::describe_stop(&state.stop_reason));

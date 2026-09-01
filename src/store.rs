@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::debate::format::FormatId;
-use crate::debate::state::{DebateState, Side, StopReason};
+use crate::debate::state::{Credence, DebateState, StopReason};
 use crate::error::{CoinError, Result};
 use crate::opencode::types::ModelRef;
 
@@ -168,34 +168,37 @@ impl<'a> Transcript<'a> {
     fn write_result(&self, out: &mut String) {
         out.push_str("\n## Result\n\n");
 
-        let series_a = self.state.credence_series(Side::A);
-        let series_b = self.state.credence_series(Side::B);
+        let rows = self.state.credence_rounds();
 
-        if !series_a.is_empty() || !series_b.is_empty() {
+        if !rows.is_empty() {
             // Each side states confidence in its own position, so the gap
             // column restates them on one proposition.
             out.push_str("| Round | A | B | Gap |\n|---|---|---|---|\n");
-            for round in 0..series_a.len().max(series_b.len()) {
-                let cell = |series: &[crate::debate::state::Credence]| {
-                    series
-                        .get(round)
-                        .map_or_else(|| "-".to_string(), ToString::to_string)
-                };
-                let gap = match (series_a.get(round), series_b.get(round)) {
-                    (Some(a), Some(b)) => {
-                        crate::debate::state::Credence::agreement_gap(*a, *b).to_string()
-                    }
-                    _ => "-".to_string(),
+            for row in &rows {
+                let cell = |value: Option<Credence>| {
+                    value.map_or_else(|| "-".to_string(), |credence| credence.to_string())
                 };
                 out.push_str(&format!(
                     "| {} | {} | {} | {} |\n",
-                    round + 1,
-                    cell(&series_a),
-                    cell(&series_b),
-                    gap
+                    row.round,
+                    cell(row.a),
+                    cell(row.b),
+                    row.gap()
+                        .map_or_else(|| "-".to_string(), |gap| gap.to_string())
                 ));
             }
             out.push('\n');
+        }
+
+        // A debate can complete with most of its structure unreadable, which
+        // silently weakens every number above.
+        let unreadable = self.state.unreadable_turns();
+        if unreadable > 0 {
+            out.push_str(&format!(
+                "**Caution:** {unreadable} of {} turns produced no readable \
+                 structured block, so the table above omits them.\n\n",
+                self.state.turns.len()
+            ));
         }
 
         out.push_str(&format!(
@@ -318,7 +321,7 @@ async fn write_file(path: &Path, contents: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::debate::state::{Credence, ParseStatus, Topic, TurnAnalysis};
+    use crate::debate::state::{Credence, ParseStatus, Side, Topic, TurnAnalysis};
     use crate::opencode::types::{Tokens, ToolCall};
 
     /// A two-turn debate ending in agreement, with tool use on side A.
@@ -422,6 +425,90 @@ mod tests {
             markdown.contains("| 1 | 70 | 35 | 5 |"),
             "gap column wrong in:\n{markdown}"
         );
+    }
+
+    #[test]
+    fn markdown_labels_rows_by_round_not_by_position() {
+        // Arrange: a debate whose early turns produced no readable block, so
+        // the only readings come from round 3. Reported from a real six round
+        // run that yielded two readings and labelled them rounds 1 and 2.
+        let mut state = DebateState::new(Topic::new("Q", "yes", "no"), 6);
+        for index in 0..4 {
+            let side = if index % 2 == 0 { Side::A } else { Side::B };
+            state.push_turn(
+                side,
+                "unparsed".to_string(),
+                TurnAnalysis::empty(ParseStatus::Missing),
+                Vec::new(),
+                Tokens::default(),
+                0.0,
+            );
+        }
+        for (side, value) in [(Side::A, 66), (Side::B, 48)] {
+            let mut analysis = TurnAnalysis::empty(ParseStatus::Ok);
+            analysis.credence = Credence::new(value);
+            state.push_turn(
+                side,
+                "argued".to_string(),
+                analysis,
+                Vec::new(),
+                Tokens::default(),
+                0.0,
+            );
+        }
+
+        // Act
+        let markdown = transcript_of(&state).to_markdown();
+
+        // Assert: the row is labelled round 3, where the readings came from.
+        assert!(
+            markdown.contains("| 3 | 66 | 48 | 14 |"),
+            "round label wrong in:\n{markdown}"
+        );
+        assert!(
+            !markdown.contains("| 1 | 66 |"),
+            "readings must not be relabelled as round 1"
+        );
+    }
+
+    #[test]
+    fn markdown_warns_when_turns_had_no_readable_structure() {
+        // Arrange: two of three turns unreadable.
+        let mut state = finished_debate();
+        state.push_turn(
+            Side::A,
+            "prose".to_string(),
+            TurnAnalysis::empty(ParseStatus::Missing),
+            Vec::new(),
+            Tokens::default(),
+            0.0,
+        );
+        state.push_turn(
+            Side::B,
+            "prose".to_string(),
+            TurnAnalysis::empty(ParseStatus::Malformed {
+                reason: "bad".to_string(),
+            }),
+            Vec::new(),
+            Tokens::default(),
+            0.0,
+        );
+
+        // Act
+        let markdown = transcript_of(&state).to_markdown();
+
+        // Assert: a sparse table must not pass for a short debate.
+        assert!(
+            markdown.contains("**Caution:** 2 of 4 turns"),
+            "missing caution in:\n{markdown}"
+        );
+    }
+
+    #[test]
+    fn markdown_omits_the_caution_when_everything_parsed() {
+        let state = finished_debate();
+        let markdown = transcript_of(&state).to_markdown();
+        assert!(!markdown.contains("Caution"));
     }
 
     #[test]

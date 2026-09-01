@@ -291,6 +291,31 @@ pub struct Turn {
     pub cost: f64,
 }
 
+/// One row of the convergence table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CredenceRound {
+    /// Round these readings come from, counting from one.
+    pub round: usize,
+    /// Side A's stated confidence in side A's position, if it stated one.
+    pub a: Option<Credence>,
+    /// Side B's stated confidence in side B's position, if it stated one.
+    pub b: Option<Credence>,
+}
+
+impl CredenceRound {
+    /// How far apart the two sides are, when both stated a confidence.
+    ///
+    /// # Returns
+    ///
+    /// The agreement gap, or `None` if either side is missing.
+    pub fn gap(&self) -> Option<u8> {
+        match (self.a, self.b) {
+            (Some(a), Some(b)) => Some(Credence::agreement_gap(a, b)),
+            _ => None,
+        }
+    }
+}
+
 /// Why a debate ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
@@ -390,15 +415,76 @@ impl DebateState {
             .find_map(|turn| turn.analysis.credence)
     }
 
-    /// Every credence stated by the given side, oldest first.
+    /// Every credence stated by the given side, paired with its round.
     ///
-    /// This is the series behind the convergence chart.
-    pub fn credence_series(&self, side: Side) -> Vec<Credence> {
+    /// The round must travel with the value. Turns whose structured block was
+    /// unreadable state no credence, so the Nth reading is not necessarily the
+    /// Nth round; a debate that ran six rounds can yield two readings. Labelling
+    /// by position would then misreport which round produced them.
+    ///
+    /// # Arguments
+    ///
+    /// * `side` - Whose credences to collect
+    ///
+    /// # Returns
+    ///
+    /// Round and credence pairs, oldest first.
+    pub fn credence_series(&self, side: Side) -> Vec<(usize, Credence)> {
         self.turns
             .iter()
             .filter(|turn| turn.side == side)
-            .filter_map(|turn| turn.analysis.credence)
+            .filter_map(|turn| turn.analysis.credence.map(|value| (turn.round, value)))
             .collect()
+    }
+
+    /// The convergence table: one row per round in which either side stated a
+    /// credence.
+    ///
+    /// # Returns
+    ///
+    /// Rows in round order, each carrying whichever readings exist.
+    pub fn credence_rounds(&self) -> Vec<CredenceRound> {
+        let mut rows: Vec<CredenceRound> = Vec::new();
+
+        for turn in &self.turns {
+            let Some(value) = turn.analysis.credence else {
+                continue;
+            };
+            let row = match rows.iter_mut().find(|row| row.round == turn.round) {
+                Some(existing) => existing,
+                None => {
+                    rows.push(CredenceRound {
+                        round: turn.round,
+                        a: None,
+                        b: None,
+                    });
+                    // The push cannot leave the vector empty.
+                    match rows.last_mut() {
+                        Some(row) => row,
+                        None => continue,
+                    }
+                }
+            };
+            match turn.side {
+                Side::A => row.a = Some(value),
+                Side::B => row.b = Some(value),
+            }
+        }
+
+        rows
+    }
+
+    /// How many turns produced no readable structured block.
+    ///
+    /// A debate can run to completion with most of its structure unreadable,
+    /// since parsing degrades rather than failing. That is the intended
+    /// behaviour, but it silently weakens every conclusion drawn from the
+    /// numbers, so the count is surfaced rather than hidden.
+    pub fn unreadable_turns(&self) -> usize {
+        self.turns
+            .iter()
+            .filter(|turn| !turn.analysis.parse_status.is_ok())
+            .count()
     }
 
     /// Total cost across every turn, in USD.
@@ -466,7 +552,12 @@ mod tests {
         let mut state = DebateState::new(Topic::new("q", "a", "b"), 6);
         for (index, value) in values.iter().enumerate() {
             let side = if index % 2 == 0 { Side::A } else { Side::B };
-            let mut analysis = TurnAnalysis::empty(ParseStatus::Ok);
+            let status = if value.is_some() {
+                ParseStatus::Ok
+            } else {
+                ParseStatus::Missing
+            };
+            let mut analysis = TurnAnalysis::empty(status);
             analysis.credence = value.and_then(Credence::new);
             state.push_turn(
                 side,
@@ -533,14 +624,83 @@ mod tests {
         let state = state_with_credences(&[Some(85), Some(20), Some(71), Some(52)]);
 
         // Act
-        let series: Vec<u8> = state
+        let series: Vec<(usize, u8)> = state
             .credence_series(Side::A)
             .iter()
-            .map(|credence| credence.value())
+            .map(|(round, credence)| (*round, credence.value()))
             .collect();
 
         // Assert
-        assert_eq!(series, vec![85, 71]);
+        assert_eq!(series, vec![(1, 85), (2, 71)]);
+    }
+
+    #[test]
+    fn credence_series_reports_the_round_a_reading_came_from() {
+        // Arrange: a long debate where only the later turns parsed, which is
+        // what a six round debate yielding two readings looks like.
+        let state = state_with_credences(&[None, None, None, None, Some(66), Some(48)]);
+
+        // Act
+        let series = state.credence_series(Side::A);
+
+        // Assert: the single reading is from round 3, not round 1. Labelling
+        // by position would have reported it as the first round.
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].0, 3);
+        assert_eq!(series[0].1.value(), 66);
+    }
+
+    #[test]
+    fn credence_rounds_pairs_the_sides_by_round() {
+        // Arrange
+        let state = state_with_credences(&[Some(72), Some(60), Some(66), Some(48)]);
+
+        // Act
+        let rows = state.credence_rounds();
+
+        // Assert
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].round, 1);
+        assert_eq!(rows[0].a.map(Credence::value), Some(72));
+        assert_eq!(rows[0].b.map(Credence::value), Some(60));
+        assert_eq!(rows[0].gap(), Some(32));
+        assert_eq!(rows[1].gap(), Some(14));
+    }
+
+    #[test]
+    fn credence_rounds_skips_rounds_where_neither_side_parsed() {
+        // Arrange: rounds 1 and 2 unreadable, round 3 fine.
+        let state = state_with_credences(&[None, None, None, None, Some(66), Some(48)]);
+
+        // Act
+        let rows = state.credence_rounds();
+
+        // Assert: one row, correctly labelled round 3.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].round, 3);
+    }
+
+    #[test]
+    fn credence_rounds_leaves_a_gap_absent_when_one_side_is_missing() {
+        // Arrange: only A stated a confidence this round.
+        let state = state_with_credences(&[Some(70), None]);
+
+        // Act
+        let rows = state.credence_rounds();
+
+        // Assert
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].b, None);
+        assert_eq!(rows[0].gap(), None);
+    }
+
+    #[test]
+    fn unreadable_turns_are_counted() {
+        // Arrange: four of six turns produced no readable block.
+        let state = state_with_credences(&[None, None, None, None, Some(66), Some(48)]);
+
+        // Act and assert
+        assert_eq!(state.unreadable_turns(), 4);
     }
 
     #[test]

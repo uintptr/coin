@@ -222,6 +222,18 @@ point, because that is a genuine resolution rather than premature agreement.
 Produces the convergence chart in the analysis rail, which is the most legible
 signal in the whole product.
 
+**A credence reading carries the round it came from.** Turns whose structured
+block is unreadable state no credence, so the Nth reading is not the Nth round:
+a six-round debate can yield two readings. Labelling readings by their position
+in the series misreports which round produced them, which is misleading in
+exactly the place a reader looks to judge the result.
+
+For the same reason, **the count of turns with no readable structure is
+surfaced** alongside the table. Parsing degrades rather than failing, by design,
+but a debate that completes with most of its structure unreadable silently
+weakens every number drawn from it. A sparse table must not pass for a short
+debate.
+
 ### 4.3 Classic rounds
 
 Opening, rebuttal, cross-examination, closing, then a judge verdict. Familiar

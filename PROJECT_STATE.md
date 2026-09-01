@@ -70,7 +70,7 @@ while still well calibrated.
 Every debate auto-saves `transcript.json` and `transcript.md` into its
 workspace; `--save FILE` writes an extra copy anywhere.
 
-**Tests:** 104 unit tests plus 6 doctests run offline and free. 4 integration
+**Tests:** 112 unit tests plus 6 doctests run offline and free. 4 integration
 tests marked `#[ignore]` drive a real server, take about 5 seconds, and cost
 well under a cent.
 
@@ -154,6 +154,11 @@ rediscovered:
   noise. Worth several repeated runs per candidate before trusting the default.
 - **Reasoning still leaks into visible text.** Some models stream their internal
   monologue as ordinary argument. Turn cards will need to handle it.
+- **Structured blocks fail more often than expected in long debates.** A real
+  six-round run produced only two readable credences per side, meaning eight of
+  twelve turns had no usable structure. The convergence check runs on the most
+  recent readable value, so it can compare stale numbers across a long gap. The
+  count is now reported, but the underlying parse rate is worth investigating.
 - **Cheap models may fabricate tool use.** Several answered as though they had
   run a tool without calling one. Model choice for debaters is a correctness
   concern, not only a cost one.
