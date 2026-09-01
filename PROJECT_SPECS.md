@@ -149,8 +149,26 @@ Every turn restates a 0-100 confidence and justifies any movement since the
 previous turn. Refusing to move without reason is called out in the prompt as a
 failure mode.
 
-Stops when `abs(credence_a - credence_b) < 15`. Produces the convergence chart
-in the analysis rail, which is the most legible signal in the whole product.
+**Convergence is `abs(a + b - 100) <= 15`, not `abs(a - b)`.** Each side reports
+confidence in **its own** assigned position, so the two numbers describe
+different propositions. When the sides agree, one is near 0 and the other near
+100. Comparing them directly reports maximum disagreement at the exact moment
+the debate has succeeded, and reports agreement when both sides are certain of
+opposing positions. Restating B's confidence on A's proposition is `100 - b`,
+which makes the gap `abs(a - (100 - b))`.
+
+This was found by running a real debate: side A verified its assigned position,
+found the evidence contradicted it, and dropped to 3 while B rose to 99. Total
+agreement, reported as a 96 point gap and "no convergence".
+
+Convergence is additionally suppressed until **two complete rounds** have
+happened. Two models under a truth-seeking mandate sometimes agree immediately,
+producing a one-round debate containing no exchange of evidence. An outright
+concession, a credence of 0 in one's own position, still ends the debate at any
+point, because that is a genuine resolution rather than premature agreement.
+
+Produces the convergence chart in the analysis rail, which is the most legible
+signal in the whole product.
 
 ### 4.3 Classic rounds
 
@@ -287,6 +305,28 @@ Because this is experimental and flag-gated, tool availability is detected at
 startup via `GET /experimental/tool` and the UI disables toggles for anything
 absent rather than failing at first use.
 
+### 5.4a A turn is not one message
+
+`POST /session/{id}/message` returns **only the last assistant message** of a
+turn. When a model uses tools, opencode records the turn as several assistant
+messages, and the tool invocations, the reasoning, and part of the cost sit in
+the earlier ones. A single verified turn looked like this:
+
+```
+assistant  [step-start, reasoning, text, tool(read), step-finish]
+assistant  [step-start, text, step-finish]   <- only this is returned
+```
+
+Reading only the prompt response therefore loses every tool call and
+undercounts cost. The engine re-reads `GET /session/{id}/message` after each
+turn and aggregates every assistant message following the last user message.
+This is deterministic and independent of event timing, which is why it is used
+for the transcript rather than the event stream; events remain the mechanism
+for live streaming.
+
+`reasoning` is its own part type and is excluded from transcript text. It is
+the model's internal monologue, not its argument.
+
 ### 5.5 Sessions and personas
 
 Three sessions per debate: side A, side B, judge. Each keeps its own history, so
@@ -307,6 +347,21 @@ $XDG_DATA_HOME/coin/debates/<debate-id>/
 
 Generating agents here rather than in the user's own config keeps debate
 personas from leaking into their normal opencode usage.
+
+**Agent files are verified to control the persona.** A file at
+`.opencode/agent/<name>.md` is registered under that name, appears in
+`GET /agent`, and its body **replaces** the built-in system prompt rather than
+being appended to it. This matters: without it, debaters would inherit
+opencode's coding-assistant prompt and behave as coding agents. Confirmed by
+giving an agent a distinctive instruction and observing the model follow it
+exactly.
+
+Agent files are read **when the server starts**, so every agent must be written
+before launching. That is why the CLI prepares the workspace, writes both
+personas, and only then launches opencode. When the web server arrives in step
+6 and a single server outlives many debates, this needs revisiting: either the
+server restarts per debate, or personas move into the first message of each
+session at the cost of leaving the built-in prompt in place.
 
 ## 6. Prompt contract and structured extraction
 

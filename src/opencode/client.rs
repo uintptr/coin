@@ -68,6 +68,27 @@ pub trait OpencodeClient: Send + Sync {
         options: &PromptOptions,
     ) -> Result<AssistantMessage>;
 
+    /// Fetch every message in a session, oldest first.
+    ///
+    /// [`OpencodeClient::prompt`] returns only the **last** assistant message
+    /// of a turn. When a model uses tools, the turn spans several assistant
+    /// messages, and the tool invocations, reasoning, and part of the cost sit
+    /// in the earlier ones. Reconstructing a complete turn therefore requires
+    /// the whole list.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id` - Session to read
+    ///
+    /// # Returns
+    ///
+    /// All messages, including the user messages that delimit turns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoinError::Http`] on transport failure.
+    async fn messages(&self, session_id: &str) -> Result<Vec<AssistantMessage>>;
+
     /// Abort an in-flight turn.
     ///
     /// # Arguments
@@ -207,6 +228,15 @@ impl OpencodeClient for HttpClient {
             reqwest::Method::POST,
             &format!("/session/{session_id}/message"),
             Some(body),
+        )
+        .await
+    }
+
+    async fn messages(&self, session_id: &str) -> Result<Vec<AssistantMessage>> {
+        self.send(
+            reqwest::Method::GET,
+            &format!("/session/{session_id}/message"),
+            None,
         )
         .await
     }

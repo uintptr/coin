@@ -9,7 +9,9 @@
 //! - [`config`] resolves runtime settings and filesystem locations
 //! - [`error`] defines the single error type used throughout
 //! - [`opencode`] owns all knowledge of the opencode server
+//! - [`debate`] holds the format-agnostic engine and the formats themselves
 
 pub mod config;
+pub mod debate;
 pub mod error;
 pub mod opencode;

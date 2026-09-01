@@ -6,19 +6,21 @@ picking the work up, and the last thing to update before finishing a session.
 the work actually is and is expected to change constantly.
 
 **Last updated:** 2026-08-31
-**Build order position:** steps 1-4 complete; step 5 is next
+**Build order position:** steps 1-5 complete; step 6 is next
 
 Deliberately no commit hash here — git already knows it, and a hash copied into
 prose is stale the moment the next commit lands.
 
 ## Where we are
 
-The opencode integration is built and proven end to end. **No debate logic
-exists yet.** The only command is `probe`, a diagnostic that sends one prompt to
-one session; it is not a debate and was never meant to be one. Its purpose was
-to de-risk the one part of the design with real unknowns before building on top
-of it, and it earned its keep: every upstream surprise listed below came out of
-building and running it.
+**Debates run.** `coin debate` puts two models against each other in the
+credence format, streams the transcript, and reports convergence. Verified on
+real questions: both sides used web search, checked primary sources, and a side
+whose assigned position the evidence contradicted conceded honestly rather than
+defending it. That is the behaviour the whole project is for.
+
+There is no web UI yet, and only one of the four formats exists. `probe`
+remains as a single-prompt diagnostic.
 
 ## Done
 
@@ -43,18 +45,32 @@ building and running it.
 a mock with no network and no model spend. Nothing outside `src/opencode/` knows
 opencode's wire format.
 
-**Tests:** 26 unit tests plus 1 doctest run offline and free. 4 integration
+### Step 5: the debate engine
+
+| Module | What it does |
+|---|---|
+| `src/debate/state.rs` | `Side`, `Topic`, `Credence`, `Claim`, `TurnAnalysis`, `Turn`, `StopReason`, `DebateState` |
+| `src/debate/format.rs` | `DebateFormat` trait, `FormatId`, and the shared truth-seeking mandate |
+| `src/debate/parse.rs` | Tolerant extraction of the trailing fenced json block |
+| `src/debate/credence.rs` | The credence-updating format |
+| `src/debate/engine.rs` | Orchestrator: two sessions, alternating turns, stop conditions |
+| `src/main.rs` | `coin debate` |
+
+Personas are delivered as generated agent files, which replace opencode's
+built-in coding prompt rather than adding to it. Each debate gets a disposable
+git-initialized workspace.
+
+**Tests:** 83 unit tests plus 5 doctests run offline and free. 4 integration
 tests marked `#[ignore]` drive a real server, take about 5 seconds, and cost
 well under a cent.
 
 ## Not done
 
-Everything below is unbuilt. This is the whole product.
+Everything below is unbuilt.
 
 | Step | Work | Notes |
 |---|---|---|
-| 5 | `debate::state`, `DebateFormat` trait, **credence** format end to end | **Start here.** Two sessions actually arguing is the first real milestone |
-| 6 | axum server, the section 9 API, snapshot-first SSE, minimal UI | |
+| 6 | axum server, the section 9 API, snapshot-first SSE, minimal UI | **Start here** |
 | 7 | Remaining three formats: crux-finding, classic rounds, claim ledger | |
 | 8 | Intervention commands: pause, resume, step, inject, reroll, edit, abort | |
 | 9 | Permission and question cards in the UI | Needed because debaters have full tool access |
@@ -64,20 +80,21 @@ Everything below is unbuilt. This is the whole product.
 
 ## Next session: start here
 
-Step 5. Concretely:
+Step 6, the web layer. Concretely:
 
-1. `src/debate/state.rs` — `Topic`, `Side`, `Turn`, `TurnAnalysis`, `Claim`,
-   `Credence`, `DebateState`, `Transcript`.
-2. `src/debate/format.rs` — the `DebateFormat` trait as specified in
-   `PROJECT_SPECS.md` section 4.
-3. `src/debate/parse.rs` — tolerant extraction of the trailing fenced `json`
-   block, degrading to prose-only. Test against deliberately malformed input
-   first; this is the highest-risk piece.
-4. `src/debate/credence.rs` — the one format, since it has the clearest stop
-   condition and the best visualization.
-5. `src/debate/engine.rs` — orchestrator driving two sessions through rounds.
-6. Prove it from the CLI before any web work, the same way `probe` proved the
-   integration.
+1. `src/web/routes.rs` — the axum router and the section 9 API surface.
+2. `src/web/stream.rs` — `tokio::sync::broadcast` to SSE, emitting a `Snapshot`
+   event on connect before any live event.
+3. `src/web/api.rs` — start a debate, read state, export.
+4. `web/index.html`, `app.js`, `styles.css` — Pico CSS and vanilla JS only.
+5. Refit `Engine::run` to publish `Progress` into the broadcast channel rather
+   than a closure, and to stream token deltas from the opencode event stream.
+
+**Resolve first:** agent files are read at server startup, but the web server
+outlives many debates, so personas cannot be written per debate the way the CLI
+does it. Either restart opencode per debate, or move personas into each
+session's first message and accept the built-in prompt remaining in place. See
+`PROJECT_SPECS.md` section 5.5.
 
 ## Upstream facts that cost time to find
 
@@ -101,16 +118,21 @@ rediscovered:
    degrade instead of killing the stream.
 6. A health poll is mandatory before the first request; opencode briefly serves
    HTML from API routes right after binding.
+7. **A turn is not one message.** `POST /session/{id}/message` returns only the
+   last assistant message; tool calls, reasoning, and part of the cost live in
+   earlier ones. The engine re-reads `GET /session/{id}/message` and aggregates
+   everything after the last user message.
+8. **Agent files replace the built-in system prompt** and are read at server
+   startup, so they must be written before launch.
 
 ## Open questions
 
-- **Tool invocation over REST is unreliable.** Web search fired during a probe
-  run, but later attempts to get any model to call `glob` produced no tool call,
-  including with `agent: "build"` specified and using a model known to call
-  tools. Not chased down, since it is an engine-phase concern. **This must be
-  resolved before step 9, and probably before step 5 is considered done**, since
-  the premise of the project is that debaters can check claims rather than
-  assert them.
+- **Personas versus a long-lived server.** Agent files are read at opencode
+  startup. The CLI writes both personas then launches, but a web server outlives
+  many debates. Blocks step 6; see "Next session".
+- **Debate cost is material.** A four-turn debate with kimi-k3 and web search
+  cost about $0.24. The UI must surface running cost, and a cheaper default for
+  debaters is worth investigating.
 - **Cheap models may fabricate tool use.** Several answered as though they had
   run a tool without calling one. Model choice for debaters is a correctness
   concern, not only a cost one.
@@ -124,11 +146,20 @@ rediscovered:
 ## Running it
 
 ```bash
-cargo run -- probe "your question"                          # one prompt, streamed
+cargo run -- debate \
+  -q "the question under dispute" \
+  -a "the case for side A" \
+  -b "the case for side B" \
+  -m digitalocean/kimi-k3 \
+  -r 2                        # max rounds; --model-b to differ the two sides
+
+cargo run -- probe "your question"                           # one prompt, streamed
 cargo run -- probe -m digitalocean/openai-gpt-oss-20b "..."  # pick a model
-cargo run -- probe --no-websearch "..."                      # disable web search
 RUST_LOG=coin=debug cargo run -- probe "..."                 # verbose
 ```
+
+Only the `credence` format is implemented; the other three are step 7 and are
+rejected with a clear message.
 
 stdout carries the model's text, stderr everything else, so it pipes cleanly.
 

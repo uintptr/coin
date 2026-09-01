@@ -106,9 +106,26 @@ pub enum Part {
         #[serde(default)]
         state: ToolState,
     },
+    /// Model reasoning, kept separate from visible output.
+    #[serde(rename = "reasoning")]
+    Reasoning {
+        /// Part identifier.
+        #[serde(default)]
+        id: String,
+        /// Reasoning content.
+        #[serde(default)]
+        text: String,
+    },
     /// Marks the beginning of a reasoning or tool step.
     #[serde(rename = "step-start")]
     StepStart {
+        /// Part identifier.
+        #[serde(default)]
+        id: String,
+    },
+    /// Marks the end of a step.
+    #[serde(rename = "step-finish")]
+    StepFinish {
         /// Part identifier.
         #[serde(default)]
         id: String,
@@ -149,17 +166,78 @@ pub struct AssistantMessage {
 impl AssistantMessage {
     /// Concatenate all text parts into a single string.
     ///
+    /// Reasoning parts are excluded: they are the model's internal monologue,
+    /// not its argument, and including them would make a debate transcript
+    /// unreadable.
+    ///
     /// # Returns
     ///
-    /// The message's text content with non-text parts omitted.
+    /// The message's visible text content.
     pub fn text(&self) -> String {
         self.parts
             .iter()
             .filter_map(|part| match part {
                 Part::Text { text, .. } => Some(text.as_str()),
-                Part::Tool { .. } | Part::StepStart { .. } | Part::Other => None,
+                Part::Reasoning { .. }
+                | Part::Tool { .. }
+                | Part::StepStart { .. }
+                | Part::StepFinish { .. }
+                | Part::Other => None,
             })
             .collect()
+    }
+
+    /// Whether this message was produced by the assistant.
+    pub fn is_assistant(&self) -> bool {
+        self.info.role == "assistant"
+    }
+
+    /// Tool invocations recorded in this message.
+    ///
+    /// # Returns
+    ///
+    /// One entry per tool part, in the order the model invoked them.
+    pub fn tool_calls(&self) -> Vec<ToolCall> {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                Part::Tool { tool, state, .. } => Some(ToolCall {
+                    tool: tool.clone(),
+                    status: state.status.clone(),
+                    detail: state.summary(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// A tool invocation, flattened for display and transcripts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Tool name, for example `bash` or `websearch`.
+    pub tool: String,
+    /// Invocation status, for example `completed`.
+    pub status: String,
+    /// Short description of what was requested, when one can be derived.
+    pub detail: String,
+}
+
+impl ToolState {
+    /// Summarize the invocation input in one line.
+    ///
+    /// Different tools name their principal argument differently, so the
+    /// common ones are checked in turn.
+    ///
+    /// # Returns
+    ///
+    /// The command, query, URL, or path, or an empty string if none applies.
+    pub fn summary(&self) -> String {
+        ["command", "query", "url", "filePath", "pattern"]
+            .iter()
+            .find_map(|key| self.input.get(key).and_then(serde_json::Value::as_str))
+            .unwrap_or_default()
+            .to_string()
     }
 }
 

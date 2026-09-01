@@ -82,6 +82,54 @@ where
     Ok(directory.to_path_buf())
 }
 
+/// Write an agent definition into a prepared workspace.
+///
+/// Agents are how coin controls a debater's persona. Verified against opencode
+/// 1.18.20: a file at `.opencode/agent/<name>.md` is registered under that name
+/// and its body **replaces** the built-in system prompt, rather than being
+/// appended to it. Without this, debaters would inherit opencode's
+/// coding-assistant prompt and behave accordingly.
+///
+/// Agent files are read when the server starts, so every agent must be written
+/// before [`crate::opencode::process::OpencodeServer::launch`].
+///
+/// # Arguments
+///
+/// * `directory` - A workspace already prepared by [`prepare`]
+/// * `name` - Agent name, which is also the file stem
+/// * `description` - Short description shown in agent listings
+/// * `prompt` - The system prompt the agent answers with
+///
+/// # Errors
+///
+/// Returns [`CoinError::Io`] if the file cannot be written.
+pub async fn write_agent<P, N, D, S>(directory: P, name: N, description: D, prompt: S) -> Result<()>
+where
+    P: AsRef<Path>,
+    N: AsRef<str>,
+    D: AsRef<str>,
+    S: AsRef<str>,
+{
+    let agent_dir = directory.as_ref().join(".opencode").join("agent");
+    tokio::fs::create_dir_all(&agent_dir)
+        .await
+        .map_err(|source| CoinError::io(&agent_dir, source))?;
+
+    let path = agent_dir.join(format!("{}.md", name.as_ref()));
+    let contents = format!(
+        "---\ndescription: {description}\nmode: primary\n---\n{prompt}\n",
+        description = description.as_ref(),
+        prompt = prompt.as_ref(),
+    );
+
+    tokio::fs::write(&path, contents)
+        .await
+        .map_err(|source| CoinError::io(&path, source))?;
+
+    debug!(agent = name.as_ref(), "wrote agent definition");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
