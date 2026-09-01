@@ -10,10 +10,12 @@
 //! - [`error`] defines the single error type used throughout
 //! - [`opencode`] owns all knowledge of the opencode server
 //! - [`debate`] holds the format-agnostic engine and the formats themselves
+//! - [`store`] records transcripts to disk
 //! - [`term`] styles command line output
 
 pub mod config;
 pub mod debate;
 pub mod error;
 pub mod opencode;
+pub mod store;
 pub mod term;

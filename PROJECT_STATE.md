@@ -54,6 +54,7 @@ opencode's wire format.
 | `src/debate/parse.rs` | Tolerant extraction of the trailing fenced json block |
 | `src/debate/credence.rs` | The credence-updating format |
 | `src/debate/engine.rs` | Orchestrator: two sessions, alternating turns, stop conditions |
+| `src/store.rs` | Transcript persistence: versioned JSON plus readable Markdown |
 | `src/term.rs` | Terminal colour, honouring NO_COLOR and non-TTY output |
 | `src/main.rs` | `coin debate`, with live per-side colour streaming |
 
@@ -66,7 +67,10 @@ the header. The default debater model is `digitalocean/glm-5.3-flash`, picked by
 benchmarking on real debates: about a fifteenth the cost of the previous default
 while still well calibrated.
 
-**Tests:** 92 unit tests plus 6 doctests run offline and free. 4 integration
+Every debate auto-saves `transcript.json` and `transcript.md` into its
+workspace; `--save FILE` writes an extra copy anywhere.
+
+**Tests:** 104 unit tests plus 6 doctests run offline and free. 4 integration
 tests marked `#[ignore]` drive a real server, take about 5 seconds, and cost
 well under a cent.
 
@@ -80,7 +84,7 @@ Everything below is unbuilt.
 | 7 | Remaining three formats: crux-finding, classic rounds, claim ledger | |
 | 8 | Intervention commands: pause, resume, step, inject, reroll, edit, abort | |
 | 9 | Permission and question cards in the UI | Needed because debaters have full tool access |
-| 10 | Judge pass, transcript persistence, export | |
+| 10 | Judge pass; transcript persistence is already done | |
 | 11 | Analysis rail: convergence chart, claim ledger, crux tree | Chart geometry computed in Rust, JS only emits SVG |
 | 12 | Optional, post-v1: `/api/openapi.json` | Deferred until types settle |
 
@@ -140,8 +144,14 @@ rediscovered:
   model, down from about $0.24 per four turns on kimi-k3. Still worth surfacing
   running cost in the UI.
 - **Speed varies enormously by model.** The default takes around 90 seconds per
-  turn with web search. One candidate needed over 400 seconds for two rounds.
-  Slow turns will matter more once a browser is waiting on them.
+  turn with web search, and a two-round debate can exceed 400 seconds. One
+  candidate needed over 400 seconds for two rounds. Slow turns will matter more
+  once a browser is waiting on them.
+- **The default model choice rests on one benchmark run.** gpt-oss-120b was
+  rejected for reporting 20 percent confidence in an obviously supported
+  position, but in a later run it produced a perfectly calibrated result at an
+  eighth the cost and three times the speed. That first result may have been
+  noise. Worth several repeated runs per candidate before trusting the default.
 - **Reasoning still leaks into visible text.** Some models stream their internal
   monologue as ordinary argument. Turn cards will need to handle it.
 - **Cheap models may fabricate tool use.** Several answered as though they had
@@ -160,6 +170,7 @@ cargo run -- debate \
   -b "the case for side B" \
   -r 2                        # max rounds; -m to pick a model,
                               # --model-b to differ the two sides
+                              # --save FILE for an extra transcript copy
 
 cargo run -- probe "your question"                           # one prompt, streamed
 cargo run -- probe -m digitalocean/openai-gpt-oss-20b "..."  # pick a model

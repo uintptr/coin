@@ -77,7 +77,30 @@ Model choice is therefore a correctness decision, not only a cost one, and the
 model in use is displayed in the debate header so a suspicious result can be
 attributed.
 
-### 2.2 Command line rendering
+### 2.2 Transcripts
+
+**Every debate is saved without being asked for.** A debate costs real money
+and several minutes, and the interesting part is often a single concession
+buried mid-argument, so losing one to a closed terminal is a real loss.
+
+Two files are written into the debate's workspace, because they serve
+different readers:
+
+- `transcript.json` carries the complete state, including every credence,
+  tool call, token count, and parse status. This is what
+  `GET /api/transcript.json` will serve.
+- `transcript.md` is for people: the topic, each turn with its tool use and
+  concessions, and the closing convergence table.
+
+The JSON is versioned so a later reader can recognise an older file, and
+records the format and models, which `DebateState` alone does not. Which model
+produced a result is exactly what a reader needs months later.
+
+`--save <FILE>` writes an additional copy anywhere; a `.json` extension selects
+JSON, anything else selects Markdown, and missing parent directories are
+created.
+
+### 2.3 Command line rendering
 
 A debate streams two voices into one terminal, so the sides are coloured
 distinctly and each side's argument is written token by token as the model

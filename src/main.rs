@@ -1,6 +1,7 @@
 //! Command line entry point for coin.
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,13 +14,14 @@ use coin::config::{OpencodeConfig, data_dir, debate_dir};
 use coin::debate::engine::{DebateConfig, Engine, Progress};
 use coin::debate::format::FormatId;
 use coin::debate::format_for;
-use coin::debate::state::{Credence, DebateState, Side, StopReason, Topic};
+use coin::debate::state::{Credence, DebateState, Side, Topic};
 use coin::error::{CoinError, Result};
 use coin::opencode::client::{HttpClient, OpencodeClient, PromptOptions};
 use coin::opencode::events::{Flow, stream_events};
 use coin::opencode::process::OpencodeServer;
 use coin::opencode::types::{ModelRef, Part, ServerEvent};
 use coin::opencode::workspace;
+use coin::store::{self, Transcript};
 use coin::term::{self, Style, paint};
 
 /// How long to wait for the event stream to observe completion after the
@@ -94,6 +96,11 @@ enum Command {
         #[arg(long, value_parser = parse_model)]
         model_b: Option<ModelRef>,
 
+        /// Also write the transcript here. A `.json` extension saves JSON,
+        /// anything else saves Markdown.
+        #[arg(short = 's', long, value_name = "FILE")]
+        save: Option<PathBuf>,
+
         /// Disable the Exa-backed web search tool.
         #[arg(long)]
         no_websearch: bool,
@@ -133,6 +140,7 @@ async fn run(cli: Cli) -> Result<()> {
             max_rounds,
             model,
             model_b,
+            save,
             no_websearch,
         } => {
             let default = DEFAULT_DEBATE_MODEL
@@ -145,7 +153,7 @@ async fn run(cli: Cli) -> Result<()> {
                 model_b: Some(model_b.or(model).unwrap_or_else(|| model_a.clone())),
                 model_a: Some(model_a),
             };
-            debate(config, format, !no_websearch).await
+            debate(config, format, !no_websearch, save).await
         }
     }
 }
@@ -173,7 +181,12 @@ fn describe_models(config: &DebateConfig) -> String {
 }
 
 /// Run a debate and print it as it unfolds.
-async fn debate(config: DebateConfig, format_id: FormatId, websearch: bool) -> Result<()> {
+async fn debate(
+    config: DebateConfig,
+    format_id: FormatId,
+    websearch: bool,
+    save: Option<PathBuf>,
+) -> Result<()> {
     let Some(format) = format_for(format_id) else {
         return Err(CoinError::EventStream(format!(
             "format {format_id} is specified but not implemented yet; \
@@ -233,6 +246,7 @@ async fn debate(config: DebateConfig, format_id: FormatId, websearch: bool) -> R
     );
     println!("{}", paint(Style::Dim, describe_models(&config)));
 
+    let config_models = (config.model_a.clone(), config.model_b.clone());
     let engine = Engine::new(Arc::clone(&client), format, config).await?;
 
     // Stream tokens live by consuming the opencode event bus alongside the
@@ -306,6 +320,30 @@ async fn debate(config: DebateConfig, format_id: FormatId, websearch: bool) -> R
     streamer.abort();
 
     print_summary(&state);
+
+    // Every debate is saved without being asked for: one costs real money and
+    // several minutes, and the interesting part is often a single concession
+    // buried mid-argument.
+    let transcript = Transcript::new(
+        &state,
+        format_id,
+        config_models.0.as_ref(),
+        config_models.1.as_ref(),
+    );
+    let saved = store::save_to_dir(&directory, &transcript).await?;
+    println!(
+        "{}",
+        paint(Style::Dim, format!("transcript {}", saved.display()))
+    );
+
+    if let Some(path) = save {
+        store::save_to_file(&path, &transcript).await?;
+        println!(
+            "{}",
+            paint(Style::Dim, format!("transcript {}", path.display()))
+        );
+    }
+
     server.shutdown().await
 }
 
@@ -380,15 +418,7 @@ fn print_summary(state: &DebateState) {
         }
     }
 
-    match &state.stop_reason {
-        Some(StopReason::Converged { gap }) => {
-            println!("ended: confidences converged, {gap} points apart");
-        }
-        Some(StopReason::Conceded { side }) => println!("ended: Debater {side} conceded"),
-        Some(StopReason::RoundCap) => println!("ended: round cap reached without convergence"),
-        Some(other) => println!("ended: {other:?}"),
-        None => println!("ended: unknown"),
-    }
+    println!("ended: {}", store::describe_stop(&state.stop_reason));
 
     let tokens = state.total_tokens();
     println!(
