@@ -343,23 +343,88 @@ supervision.
 
 ### 8.4 Domain events
 
-Broadcast to browsers: `DebateStarted`, `RoundStarted`, `TurnStarted`,
-`TurnDelta`, `ToolCallStarted`, `ToolCallCompleted`, `TurnCompleted`,
-`AnalysisUpdated`, `PermissionRequested`, `QuestionAsked`, `StateChanged`,
-`UsageUpdated`, `DebateFinished`, `Error`.
+Broadcast to subscribers: `Snapshot`, `DebateStarted`, `RoundStarted`,
+`TurnStarted`, `TurnDelta`, `ToolCallStarted`, `ToolCallCompleted`,
+`TurnCompleted`, `AnalysisUpdated`, `PermissionRequested`, `QuestionAsked`,
+`StateChanged`, `UsageUpdated`, `DebateFinished`, `Error`.
 
-## 9. Coin's own HTTP API
+`Snapshot` carries the complete current state and is emitted to each subscriber
+on connect. See section 9.3.
 
-| Route | Purpose |
-|---|---|
-| `GET /` | UI, served from an embedded bundle |
-| `GET /api/stream` | SSE of domain events |
-| `GET /api/models` | Model list, proxied |
-| `GET /api/tools` | Detected tool availability |
-| `POST /api/debate` | Start a debate |
-| `POST /api/control` | One of the commands in 8.2 |
-| `GET /api/transcript.json` | Export |
-| `GET /api/transcript.md` | Export, human-readable |
+## 9. Coin's HTTP API
+
+This is a **supported, scriptable interface**, not just the UI's private
+backend. A debate can be configured, launched, steered, and exported entirely
+from `curl` with no browser involved; the web UI is one client of this API
+rather than a privileged one. Routes are resource-oriented and are expected to
+stay stable.
+
+### 9.1 Routes
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/` | UI, served from an embedded bundle |
+| GET | `/api/health` | Coin status, version, opencode child status |
+| GET | `/api/models` | Available models, proxied from opencode |
+| GET | `/api/tools` | Detected tool availability |
+| GET | `/api/formats` | The four formats and their default stop conditions |
+| POST | `/api/debate` | Create and start a debate |
+| GET | `/api/debate` | **Full state snapshot** |
+| DELETE | `/api/debate` | Abort and clear the current debate |
+| GET | `/api/debate/turns` | All turns; `?since=N` for the tail |
+| GET | `/api/debate/turns/{index}` | A single turn |
+| PATCH | `/api/debate/turns/{index}` | Edit a turn's text |
+| POST | `/api/debate/control` | A command from section 8.2 |
+| GET | `/api/debate/permissions` | Pending permission requests |
+| POST | `/api/debate/permissions/{id}` | Allow or deny |
+| GET | `/api/debate/questions` | Pending questions |
+| POST | `/api/debate/questions/{id}` | Answer |
+| GET | `/api/stream` | SSE of domain events, snapshot-first |
+| GET | `/api/debates` | Previously saved debates |
+| GET | `/api/debates/{id}` | A saved transcript |
+| GET | `/api/transcript.json` | Current debate, machine-readable |
+| GET | `/api/transcript.md` | Current debate, human-readable |
+
+Coin runs one debate at a time, which is why `/api/debate` is singular. Saved
+debates are addressable under the plural collection.
+
+### 9.2 Conventions
+
+- All request and response bodies are JSON, except the Markdown export.
+- Errors return an appropriate status with
+  `{"error": {"kind": "...", "message": "..."}}`, produced by the single
+  `AppError` type in `error.rs`.
+- `GET /api/debate` returns `404` when no debate is active, so scripts can
+  distinguish "no debate" from "debate idle".
+- `GET /api/health` reports an API version. Breaking changes bump it; additive
+  changes do not.
+
+### 9.3 Snapshot-first streaming
+
+`GET /api/stream` emits a `Snapshot` event carrying the complete current state
+before any live events, then streams deltas.
+
+This closes a real gap: a client that subscribes mid-debate, or a browser that
+is simply reloaded, would otherwise render an empty view and populate only from
+the next token delta. Replaying the snapshot on the stream itself, rather than
+offering a separate endpoint the client must fetch first, removes the race
+between fetching state and subscribing to changes. `GET /api/debate` still
+exists for clients that want the state without holding a stream open.
+
+### 9.4 Scripted example
+
+```bash
+curl -sX POST localhost:7777/api/debate -H 'content-type: application/json' -d '{
+  "question": "Does the GIL still limit CPU-bound threading in Python 3.13?",
+  "position_a": "The GIL remains a hard limit in default builds.",
+  "position_b": "Free-threaded builds have removed the limit in practice.",
+  "format": "credence",
+  "max_rounds": 6
+}'
+
+curl -sN localhost:7777/api/stream          # snapshot, then live events
+curl -s localhost:7777/api/transcript.md    # readable transcript
+```
 
 ## 10. Web UI
 
@@ -428,12 +493,15 @@ coin/
 3. `opencode::process` and `client` — prove a session round trip.
 4. `opencode::events` — consume `/event`, log deltas.
 5. `debate::state`, the format trait, and **credence** only, end to end.
-6. axum server, SSE, minimal UI streaming that one format.
+6. axum server, the section 9 API including snapshot-first streaming, and a
+   minimal UI over it streaming that one format.
 7. The remaining three formats behind the dropdown.
 8. Intervention commands.
 9. Permission and question cards.
 10. Judge pass, persistence, export.
 11. Analysis rail visualizations.
+12. Optional, post-v1: serve a generated OpenAPI document at `/api/openapi.json`
+    so the API is discoverable the way opencode's own is.
 
 ## 13. Verification
 
@@ -443,10 +511,15 @@ coin/
 - An integration test spawns a real `opencode serve`, creates a session, and
   asserts a completed message. Marked `#[ignore]` so the default run stays
   offline and fast.
+- API-level tests exercise every route in section 9 against an engine backed by
+  a mocked client, including that `GET /api/stream` emits `Snapshot` before any
+  live event and that a mid-debate subscriber reconstructs full state from it.
 - `cargo clippy -- -D warnings` and `cargo fmt --check` clean.
 - Manual end to end: run one debate per format on a question with a knowable
   answer; confirm live streaming, a tool call with citations rendered inline,
   pause, inject, reroll and resume all behaving, and a clean transcript export.
+- Manual API check: drive a full debate from `curl` alone, with the browser
+  closed, per the example in section 9.4.
 
 ## 14. Known risks
 
