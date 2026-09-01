@@ -1,0 +1,22 @@
+[package]
+name = "coin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+clap = { version = "4.6.6", features = ["derive"] }
+dirs = "6.0.0"
+dotenvy = "0.15.7"
+eventsource-stream = "0.2.3"
+futures-util = "0.3.34"
+rand = "0.10.2"
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "process", "signal", "sync", "time", "io-util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.26.0", features = ["v4", "serde"] }

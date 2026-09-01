@@ -185,6 +185,15 @@ http://127.0.0.1:PORT` line from stdout to discover the port.
 launch the server briefly serves the web UI's HTML from `POST /api/session`
 instead of JSON. Poll `GET /api/health` until `{"healthy":true}`.
 
+**The project directory must be a git repository.** opencode resolves its model
+catalog per project, and a directory outside a repository yields an empty one:
+`GET /api/model` returned zero entries against a plain directory and 30 against
+the same directory after `git init`. Prompting still succeeds using the
+server's default model, so the failure is quiet — the symptom is an empty model
+picker, not an error. `opencode::workspace::prepare` initializes a repository
+before launch for this reason, which also means every per-debate workspace is a
+repository and a debate's file changes are diffable.
+
 The child is killed on drop and on SIGINT. Orphaned servers are a bug.
 
 ### 5.2 REST surface used
@@ -226,6 +235,17 @@ persona and model are selectable per turn without recreating a session.
 | `question.asked` | Raise a question card in the UI |
 
 Events are filtered by session id to route them to the correct column.
+
+Every event nests its payload under a `properties` key. `message.part.delta`
+carries its fragment in **`delta`**, not `text`, alongside a `field`
+discriminator whose observed values are `text` for visible output and
+`reasoning` for thinking tokens. Debate transcripts consume `text` only.
+
+Decoding is deliberately tolerant, matching the philosophy in section 6: an
+unrecognized event type, or a known type whose payload does not fit the
+expected shape, degrades to an ignored event rather than terminating the
+stream. opencode publishes many types coin does not model and adds more over
+time, and one unmodelled event must never end a running debate.
 
 ### 5.4 Web search
 
