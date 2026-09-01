@@ -2,6 +2,15 @@
 
 Version 0.1.0 (draft)
 
+> This document is the design: what coin should be, and why. **Every design
+> decision belongs here**, including ones reached mid-conversation and ones
+> forced by something discovered about an upstream dependency — recorded as
+> part of the same change that acts on the decision, not afterwards.
+>
+> `PROJECT_STATE.md` is the companion: what is built so far, what is left, and
+> where to pick up. It tracks progress and links back to the sections here
+> rather than restating them.
+
 ## 1. Purpose
 
 Coin runs a structured debate between two LLM debaters over a proposition the
