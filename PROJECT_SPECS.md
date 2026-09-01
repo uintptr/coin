@@ -1,0 +1,460 @@
+# Coin — Project Specification
+
+Version 0.1.0 (draft)
+
+## 1. Purpose
+
+Coin runs a structured debate between two LLM debaters over a proposition the
+user supplies, and streams it live to a local web UI so the reasoning can be
+watched, steered, and audited as it happens.
+
+The design goal is **truth-seeking, not persuasion**. Both debaters are
+instructed that arriving at the ground truth outranks winning, that conceding a
+point is a success rather than a failure, and that stating a confidence honestly
+matters more than defending an assigned position. The debate formats are chosen
+to make either convergence, or the precise point of irreducible disagreement,
+visible and inspectable.
+
+Debaters have the **full capability of an opencode agent**: all tools, skills,
+subagents, and web search. A debater arguing about a benchmark result can run
+the benchmark. A debater arguing about an API's behavior can read its source.
+This is the central bet of the project — a debate where claims can be checked
+beats a debate where they can only be asserted.
+
+### 1.1 Non-goals
+
+- Not a general chat interface. One debate at a time, one purpose.
+- Not a scoring or leaderboard system for models.
+- Not multi-user. Binds to loopback, single operator.
+- Not a persuasion or rhetoric trainer.
+
+## 2. User-facing behavior
+
+The user supplies a question and both sides of the argument, picks a format and
+models, and launches. The UI then shows two columns of live-streaming argument,
+with tool invocations and citations inline, plus a format-dependent analysis
+rail. The user can pause, inject guidance to either side, re-roll a weak turn,
+edit a turn, or abort at any point.
+
+### 2.1 Inputs
+
+| Field | Type | Notes |
+|---|---|---|
+| Question | text | The proposition under dispute |
+| Position A | text | The case the first debater is assigned |
+| Position B | text | The case the second debater is assigned |
+| Format | enum | One of the four in section 4 |
+| Model A / B / Judge | string | `provider/model`, defaults to the same model on both sides |
+| Max rounds | integer | Hard cap, default 6 |
+| Tools enabled | multi | Defaults from detected tool availability |
+| Judge summary | bool | Default on |
+| Step mode | bool | Default off; pause after every turn |
+| Auto-approve | bool | Default off; see section 7 |
+
+Assigning the same model to both sides is the default because it isolates the
+argument from model capability. Differing models are supported and are the more
+interesting configuration once the basics work.
+
+## 3. Architecture
+
+```
+                  browser (Pico CSS + vanilla JS)
+                        |  SSE /api/stream      ^ POST /api/control
+                        v                       |
+        +---------------------------------------------------+
+        |  coin (Rust, axum + tokio)                         |
+        |                                                    |
+        |  web::stream  <-- broadcast::Sender<DebateEvent>   |
+        |        ^                                           |
+        |  debate::engine  (orchestrator task, state machine)|
+        |        |  DebateFormat trait -> 4 impls            |
+        |        v                                           |
+        |  opencode::client (reqwest + SSE consumer)         |
+        +---------------------------------------------------+
+                        |  REST + /event SSE
+                        v
+              opencode serve  (child process, random port)
+                        |
+              DigitalOcean / OpenRouter  + Exa websearch
+```
+
+There are two SSE hops. The inner hop consumes opencode's raw event firehose.
+The engine translates it into a small domain event enum. The outer hop
+broadcasts that enum to every connected browser. The browser never sees
+opencode's wire format, so a schema change upstream is absorbed in one module
+rather than rippling into the UI.
+
+### 3.1 Why opencode as the transport
+
+The program never handles an API key. Credentials for DigitalOcean and
+OpenRouter already live in `~/.local/share/opencode/auth.json`, and driving
+`opencode serve` inherits them along with model routing, tool execution, skill
+loading, and subagent spawning. Reimplementing that surface against raw
+provider APIs would be a large amount of work to arrive at less capability.
+
+The cost is a child process to supervise and session-shaped rather than
+chat-shaped semantics. Section 5 covers both.
+
+## 4. Debate formats
+
+Formats are selected per debate, because the right structure depends on the
+question. An empirical dispute with a checkable answer wants credence tracking;
+a definitional or values dispute wants classic rounds. All four implement one
+trait, so a fifth is purely additive.
+
+```rust
+pub trait DebateFormat: Send + Sync {
+    /// Stable identifier used in configuration and persistence.
+    fn id(&self) -> FormatId;
+
+    /// System prompt establishing the persona and the truth-seeking mandate.
+    fn system_prompt(&self, side: Side, topic: &Topic) -> String;
+
+    /// Prompt for this side's next turn, given everything that has happened.
+    fn turn_prompt(&self, state: &DebateState, side: Side) -> String;
+
+    /// Extract format-specific structure from a completed turn.
+    fn parse_turn(&self, raw: &str) -> TurnAnalysis;
+
+    /// Whether the debate has reached its natural end.
+    fn should_stop(&self, state: &DebateState) -> Option<StopReason>;
+}
+```
+
+### 4.1 Crux-finding
+
+Rounds narrow toward the single load-bearing disagreement.
+
+1. State position and the one claim it most depends on.
+2. Identify the opponent's load-bearing claim.
+3. State explicitly what evidence would change your mind.
+4. Narrow to the shared crux.
+
+Stops when both sides name the same crux. Output is the crux plus what would
+settle it. Best fit when the disagreement is real but the parties have not
+located it.
+
+### 4.2 Credence updating
+
+Every turn restates a 0-100 confidence and justifies any movement since the
+previous turn. Refusing to move without reason is called out in the prompt as a
+failure mode.
+
+Stops when `abs(credence_a - credence_b) < 15`. Produces the convergence chart
+in the analysis rail, which is the most legible signal in the whole product.
+
+### 4.3 Classic rounds
+
+Opening, rebuttal, cross-examination, closing, then a judge verdict. Familiar
+and readable. Appropriate when convergence is not expected and the value is in
+seeing both cases stated as strongly as possible.
+
+Stops after the closing statements.
+
+### 4.4 Claim ledger
+
+Every turn is parsed into discrete claims tagged `agreed`, `disputed`, or
+`unresolved`, accumulating into a shared ledger. Truth is read off the ledger
+rather than off the rhetoric.
+
+Stops when a full round introduces no new claims.
+
+### 4.5 Common rules
+
+All formats respect the hard round cap. Unless disabled, all end with a judge
+pass over the full transcript producing a verdict and a confidence.
+
+## 5. opencode integration
+
+Facts in this section were verified against opencode 1.18.20 by probing a live
+server and inspecting the shipped binary. They are version-sensitive.
+
+### 5.1 Process supervision
+
+`opencode::process` spawns:
+
+```
+opencode serve --port 0 --hostname 127.0.0.1
+```
+
+with `OPENCODE_ENABLE_EXA=1` and a freshly generated `OPENCODE_SERVER_PASSWORD`
+in the environment. It parses the `opencode server listening on
+http://127.0.0.1:PORT` line from stdout to discover the port.
+
+**A health poll is mandatory before the first request.** Immediately after
+launch the server briefly serves the web UI's HTML from `POST /api/session`
+instead of JSON. Poll `GET /api/health` until `{"healthy":true}`.
+
+The child is killed on drop and on SIGINT. Orphaned servers are a bug.
+
+### 5.2 REST surface used
+
+opencode exposes two coexisting API surfaces: legacy flat routes and a v2
+surface under `/api/*` that wraps responses in `{"data": ...}`. We use the
+legacy routes for session work, where the response shape is flatter, and v2 for
+health and model listing.
+
+| Purpose | Call |
+|---|---|
+| Health | `GET /api/health` |
+| Model list | `GET /api/model` |
+| Tool availability | `GET /experimental/tool` |
+| Create session | `POST /session` |
+| Send turn | `POST /session/{id}/message` |
+| Abort turn | `POST /session/{id}/abort` |
+| Delete message (reroll) | `DELETE /session/{id}/message/{messageID}` |
+| Patch part (edit) | `PATCH /session/{id}/message/{messageID}/part/{partID}` |
+| Answer permission | `POST /session/{id}/permissions/{permissionID}` |
+| Answer question | `POST /session/{id}/question/{requestID}/reply` |
+| Event stream | `GET /event` |
+
+The prompt payload accepts `agent`, `model`, and `variant` alongside `parts`, so
+persona and model are selectable per turn without recreating a session.
+
+### 5.3 Events consumed
+
+`GET /event` is an SSE bus carrying all session activity. Consumed types:
+
+| Event | Use |
+|---|---|
+| `message.part.delta` | Token deltas for live streaming |
+| `message.part.updated` | Tool call state, citations |
+| `message.updated` | Token and cost accounting |
+| `session.idle` | **Turn complete** — the primary completion signal |
+| `session.error` | Surface failure, halt the debate |
+| `permission.asked` | Raise a permission card in the UI |
+| `question.asked` | Raise a question card in the UI |
+
+Events are filtered by session id to route them to the correct column.
+
+### 5.4 Web search
+
+Web search is the `websearch` tool, backed by Exa over MCP. It is **off by
+default** and gated behind `OPENCODE_ENABLE_EXA=1` (aliases
+`OPENCODE_EXPERIMENTAL=1`, `OPENCODE_EXPERIMENTAL_EXA=1`).
+
+`EXA_API_KEY` is optional. Without it, opencode falls back to the keyless
+`https://mcp.exa.ai/mcp` endpoint. `OPENCODE_WEBSEARCH_PROVIDER` accepts `exa`
+or `parallel`.
+
+Because this is experimental and flag-gated, tool availability is detected at
+startup via `GET /experimental/tool` and the UI disables toggles for anything
+absent rather than failing at first use.
+
+### 5.5 Sessions and personas
+
+Three sessions per debate: side A, side B, judge. Each keeps its own history, so
+a debater sees its own prior reasoning plus exactly what the engine chooses to
+show it of the opponent. The engine controls what crosses between them.
+
+Personas are generated as agent markdown files in a per-debate workspace, which
+is also the session project directory:
+
+```
+$XDG_DATA_HOME/coin/debates/<debate-id>/
+  opencode.jsonc          generated: permission policy, model defaults
+  .opencode/agent/
+    side-a.md  side-b.md  judge.md
+  transcript.json         appended as the debate runs
+  workspace/              debater scratch space for tool use
+```
+
+Generating agents here rather than in the user's own config keeps debate
+personas from leaking into their normal opencode usage.
+
+## 6. Prompt contract and structured extraction
+
+Each format asks the model to close its turn with a fenced JSON block carrying
+format-specific fields. For credence updating:
+
+````
+```json
+{
+  "credence": 64,
+  "moved_because": "the 2024 figure I cited was superseded",
+  "conceded": ["the effect size is smaller than I claimed"],
+  "key_claim": "the causal direction runs the other way"
+}
+```
+````
+
+`debate::parse` extracts the last fenced `json` block and deserializes it.
+
+**Parsing is deliberately tolerant.** A missing or malformed block degrades the
+turn to prose-only, records a `ParseStatus`, and shows a warning badge in the
+UI. It never fails the debate. This is the most likely source of runtime
+friction, and it is cheaper to degrade than to halt.
+
+## 7. Permissions and safety
+
+Debaters can execute arbitrary shell commands. This is a deliberate capability
+and the main reason the project is useful, but it is not something to leave
+unsupervised by default.
+
+Containment has two layers:
+
+1. **Scoped workspace.** The session project directory is a disposable
+   per-debate scratch directory, so file operations land somewhere throwaway
+   rather than in the user's real projects.
+2. **Ask by default.** The generated `opencode.jsonc` sets `ask` for `bash` and
+   edit-class tools, `allow` for read-class tools and `websearch`. A
+   `permission.asked` event becomes a card in the UI with allow and deny
+   buttons. An **auto-approve** toggle rewrites the policy to `allow` for users
+   who would rather not babysit it.
+
+Neither layer is a sandbox. A debater that is allowed to run `bash` can reach
+outside the workspace. Auto-approve should be treated as equivalent to running
+an unsupervised agent with shell access, because that is what it is.
+
+## 8. Engine
+
+### 8.1 States
+
+```
+Idle -> Running -> Streaming{side} -> TurnComplete -> Running -> ... -> Judging -> Finished
+             ^  |
+             |  +-- Paused --> Resume
+             |  +-- AwaitingPermission --> Resume
+             +----- Reroll / Edit / Inject
+```
+
+`Failed` is reachable from any state on `session.error` or transport failure.
+
+### 8.2 Commands
+
+Delivered over an `mpsc` channel from the HTTP handlers:
+
+`Start(DebateConfig)`, `Pause`, `Resume`, `Step`, `Inject { side, text }`,
+`Reroll`, `EditTurn { index, text }`, `Abort`,
+`RespondPermission { id, allow }`, `RespondQuestion { id, answer }`.
+
+### 8.3 Intervention semantics
+
+- **Pause** takes effect at the next turn boundary; the in-flight turn finishes
+  streaming. **Abort** is the harder stop and cancels mid-token.
+- **Inject** appends a user note to one side's session before its next turn.
+- **Reroll** deletes the last assistant message and re-prompts.
+- **Edit** replaces the turn text in the transcript and patches the part
+  upstream, so the opponent sees the edited version.
+
+The debate runs continuously by default and intervention acts on the last
+completed turn. **Step mode** switches to pausing after every turn for close
+supervision.
+
+### 8.4 Domain events
+
+Broadcast to browsers: `DebateStarted`, `RoundStarted`, `TurnStarted`,
+`TurnDelta`, `ToolCallStarted`, `ToolCallCompleted`, `TurnCompleted`,
+`AnalysisUpdated`, `PermissionRequested`, `QuestionAsked`, `StateChanged`,
+`UsageUpdated`, `DebateFinished`, `Error`.
+
+## 9. Coin's own HTTP API
+
+| Route | Purpose |
+|---|---|
+| `GET /` | UI, served from an embedded bundle |
+| `GET /api/stream` | SSE of domain events |
+| `GET /api/models` | Model list, proxied |
+| `GET /api/tools` | Detected tool availability |
+| `POST /api/debate` | Start a debate |
+| `POST /api/control` | One of the commands in 8.2 |
+| `GET /api/transcript.json` | Export |
+| `GET /api/transcript.md` | Export, human-readable |
+
+## 10. Web UI
+
+Per `AGENT_rust.md`: **Pico CSS and vanilla JavaScript only**. No React, no
+jQuery, no component framework. Adaptive light and dark theming with an explicit
+toggle. Google Fonts for a distinct header and body pairing. A custom stylesheet
+rather than Pico defaults, themed to suit an adversarial-but-cooperative
+subject. Served from a `rust-embed` bundle so the binary is self-contained.
+
+- **Setup panel** — the inputs in section 2.1, with model pickers populated live.
+- **Debate view** — two columns streaming tokens, turn cards showing tool
+  invocations and citations inline. Since debaters have full tool access,
+  showing what they ran and what came back is central to judging the reasoning,
+  not a debug affordance.
+- **Analysis rail** — format-dependent: convergence chart, claim ledger, or crux
+  tree.
+- **Intervention bar** — pause, resume, step, inject, reroll, abort, export,
+  plus permission and question cards as they arrive.
+- **Usage footer** — running token and cost totals, which arrive on every
+  message response.
+
+Per the guideline that deep computation stays in Rust, chart geometry (series
+normalization, axis ticks, polyline points) is computed server-side and sent as
+ready-to-render values. The JavaScript only emits inline SVG from them.
+
+## 11. Layout and dependencies
+
+```
+coin/
+  Cargo.toml
+  PROJECT_SPECS.md
+  src/
+    main.rs                 clap CLI: --port, --open, --data-dir, --no-browser
+    config.rs               AppConfig, dotenvy, defaults
+    error.rs                thiserror AppError + axum IntoResponse
+    opencode/
+      process.rs            spawn, port discovery, health poll, kill-on-drop
+      client.rs             sessions, prompt, abort, permissions
+      events.rs             SSE consumer -> typed events
+      types.rs              serde models for the REST surface
+      workspace.rs          per-debate dir, agents, opencode.jsonc
+    debate/
+      format.rs             DebateFormat trait, FormatId, StopReason
+      crux.rs  credence.rs  classic.rs  ledger.rs
+      state.rs              DebateState, Turn, Claim, Credence, Transcript
+      engine.rs             orchestrator task + command state machine
+      parse.rs              tolerant fenced-JSON extraction
+      judge.rs              final verdict pass
+    web/
+      routes.rs             axum router + embedded static serving
+      stream.rs             broadcast -> axum SSE
+      api.rs                control handlers
+    store.rs                persistence and export
+  web/  index.html  app.js  styles.css
+```
+
+`axum`, `tokio`, `tower-http` (trace, compression, timeout), `reqwest`
+(json, stream), `eventsource-stream`, `serde`, `serde_json`, `thiserror`,
+`anyhow`, `tracing`, `tracing-subscriber`, `clap`, `dotenvy`, `rust-embed`,
+`uuid`.
+
+## 12. Build order
+
+1. This specification, reviewed before code.
+2. Scaffold: `cargo init`, dependencies, `error.rs`, `config.rs`, tracing.
+3. `opencode::process` and `client` — prove a session round trip.
+4. `opencode::events` — consume `/event`, log deltas.
+5. `debate::state`, the format trait, and **credence** only, end to end.
+6. axum server, SSE, minimal UI streaming that one format.
+7. The remaining three formats behind the dropdown.
+8. Intervention commands.
+9. Permission and question cards.
+10. Judge pass, persistence, export.
+11. Analysis rail visualizations.
+
+## 13. Verification
+
+- `cargo test` covers `debate::parse` against deliberately malformed JSON
+  blocks, each format's `should_stop`, and the engine state machine driven by a
+  mocked client trait. No test contacts a real model.
+- An integration test spawns a real `opencode serve`, creates a session, and
+  asserts a completed message. Marked `#[ignore]` so the default run stays
+  offline and fast.
+- `cargo clippy -- -D warnings` and `cargo fmt --check` clean.
+- Manual end to end: run one debate per format on a question with a knowable
+  answer; confirm live streaming, a tool call with citations rendered inline,
+  pause, inject, reroll and resume all behaving, and a clean transcript export.
+
+## 14. Known risks
+
+| Risk | Mitigation |
+|---|---|
+| Models emit unparseable structure | Tolerant parser, degrade to prose, tested against malformed samples |
+| Debaters execute arbitrary commands | Scoped workspace, ask-by-default permissions, explicit auto-approve opt-in |
+| Exa search is experimental and flag-gated | Startup capability detection, UI disables what is absent |
+| opencode API drift across releases | Integration isolated to `opencode/`, pinned version noted, ignored integration test catches breakage |
+| Cost accumulates quickly with tools | Live token and cost totals in the footer, hard round cap |
+| Debaters collapse into agreement without reasoning | Prompts explicitly reward justified movement and penalize unjustified concession; the credence chart makes a suspicious collapse visible |
