@@ -14,7 +14,9 @@ use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use crate::error::{CoinError, Result};
-use crate::opencode::types::{AssistantMessage, PromptPart, PromptRequest, Session, V2Envelope};
+use crate::opencode::types::{
+    AssistantMessage, ModelRef, PromptPart, PromptRequest, ProvidersResponse, Session,
+};
 
 /// Maximum number of body bytes retained when reporting an HTTP error.
 const ERROR_BODY_LIMIT: usize = 512;
@@ -24,8 +26,8 @@ const ERROR_BODY_LIMIT: usize = 512;
 pub struct PromptOptions {
     /// Agent to answer as, which selects the persona.
     pub agent: Option<String>,
-    /// Model in `provider/model` form. Falls back to the server default.
-    pub model: Option<String>,
+    /// Model to answer with. Falls back to the server default when unset.
+    pub model: Option<ModelRef>,
 }
 
 /// Operations coin performs against an opencode server.
@@ -81,12 +83,12 @@ pub trait OpencodeClient: Send + Sync {
     ///
     /// # Returns
     ///
-    /// Model identifiers in `provider/model` form.
+    /// Every model across all configured providers, sorted for stable display.
     ///
     /// # Errors
     ///
     /// Returns [`CoinError::Http`] on transport failure.
-    async fn models(&self) -> Result<Vec<String>>;
+    async fn models(&self) -> Result<Vec<ModelRef>>;
 }
 
 /// Real client, talking to a running opencode server over HTTP.
@@ -221,19 +223,30 @@ impl OpencodeClient for HttpClient {
         Ok(())
     }
 
-    async fn models(&self) -> Result<Vec<String>> {
-        let envelope: V2Envelope<Vec<serde_json::Value>> =
-            self.send(reqwest::Method::GET, "/api/model", None).await?;
+    async fn models(&self) -> Result<Vec<ModelRef>> {
+        // `/config/providers`, not `/api/model`. The latter lists only
+        // opencode's own hosted models and omits every configured provider,
+        // so a client built on it sees an empty catalog for the providers the
+        // user is actually authenticated against.
+        let response: ProvidersResponse = self
+            .send(reqwest::Method::GET, "/config/providers", None)
+            .await?;
 
-        Ok(envelope
-            .data
-            .iter()
-            .filter_map(|model| {
-                let provider = model.get("providerID")?.as_str()?;
-                let id = model.get("id")?.as_str()?;
-                Some(format!("{provider}/{id}"))
+        let mut models: Vec<ModelRef> = response
+            .providers
+            .into_iter()
+            .flat_map(|provider| {
+                provider
+                    .models
+                    .into_keys()
+                    .map(move |model_id| ModelRef::new(provider.id.clone(), model_id))
             })
-            .collect())
+            .collect();
+
+        models.sort_by(|left, right| {
+            (&left.provider_id, &left.model_id).cmp(&(&right.provider_id, &right.model_id))
+        });
+        Ok(models)
     }
 }
 
@@ -279,12 +292,13 @@ mod tests {
     }
 
     #[test]
-    fn prompt_request_includes_agent_and_model_when_set() {
-        // Arrange
+    fn prompt_request_sends_the_model_as_an_object() {
+        // Arrange: opencode rejects a bare string here with
+        // `Expected object | null`, so the shape matters.
         let request = PromptRequest {
             parts: vec![PromptPart::text("hello")],
             agent: Some("side-a".to_string()),
-            model: Some("digitalocean/anthropic-claude-opus-5".to_string()),
+            model: Some(ModelRef::new("digitalocean", "openai-gpt-oss-20b")),
         };
 
         // Act
@@ -292,6 +306,11 @@ mod tests {
 
         // Assert
         assert!(json.contains(r#""agent":"side-a""#));
-        assert!(json.contains("anthropic-claude-opus-5"));
+        assert!(
+            json.contains(
+                r#""model":{"providerID":"digitalocean","modelID":"openai-gpt-oss-20b"}"#
+            ),
+            "model must serialize as an object, got {json}"
+        );
     }
 }

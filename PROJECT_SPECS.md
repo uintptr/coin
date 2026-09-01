@@ -206,7 +206,7 @@ health and model listing.
 | Purpose | Call |
 |---|---|
 | Health | `GET /api/health` |
-| Model list | `GET /api/model` |
+| Model list | `GET /config/providers` |
 | Tool availability | `GET /experimental/tool` |
 | Create session | `POST /session` |
 | Send turn | `POST /session/{id}/message` |
@@ -219,6 +219,23 @@ health and model listing.
 
 The prompt payload accepts `agent`, `model`, and `variant` alongside `parts`, so
 persona and model are selectable per turn without recreating a session.
+**`model` must be an object**, `{"providerID": ..., "modelID": ...}`; a bare
+`"digitalocean/kimi-k3"` string is rejected with `Expected object | null`.
+Model identifiers may themselves contain slashes (`openrouter/z-ai/glm-5.2:free`),
+so `provider/model` input splits on the first separator only.
+
+**Model listing is `GET /config/providers`, not `GET /api/model`.** The latter
+returns only opencode's own hosted catalog and omits every configured provider:
+against this machine it listed 6 opencode models and zero of the 89 DigitalOcean
+and 354 OpenRouter models actually reachable. Those hosted models are also not
+usable without separate opencode Zen credentials, so a picker built on
+`/api/model` would be both empty of real options and full of unusable ones.
+
+A listed model is not necessarily a usable one. DigitalOcean returns
+`this model is not available for your subscription tier` or `model not found`
+for parts of its catalog, and the failure surfaces as an `UnknownError` from the
+prompt route with the real cause only in the server log. The UI should report
+these clearly rather than presenting the whole catalog as available.
 
 ### 5.3 Events consumed
 
@@ -531,6 +548,13 @@ coin/
 - An integration test spawns a real `opencode serve`, creates a session, and
   asserts a completed message. Marked `#[ignore]` so the default run stays
   offline and fast.
+- Integration tests pin an explicit cheap model rather than accepting the
+  server default, which is a general-purpose model roughly 35 times more
+  expensive. The default is `digitalocean/openai-gpt-oss-20b`, measured at
+  about $0.0004 and one second per call against $0.0136 and several seconds;
+  a full four-test run costs well under a cent and finishes in five seconds.
+  `COIN_TEST_MODEL=provider/model` overrides it when a run needs different
+  behaviour, such as a model that reliably invokes tools.
 - API-level tests exercise every route in section 9 against an engine backed by
   a mocked client, including that `GET /api/stream` emits `Snapshot` before any
   live event and that a mid-debate subscriber reconstructs full state from it.
@@ -549,5 +573,6 @@ coin/
 | Debaters execute arbitrary commands | Scoped workspace, ask-by-default permissions, explicit auto-approve opt-in |
 | Exa search is experimental and flag-gated | Startup capability detection, UI disables what is absent |
 | opencode API drift across releases | Integration isolated to `opencode/`, pinned version noted, ignored integration test catches breakage |
-| Cost accumulates quickly with tools | Live token and cost totals in the footer, hard round cap |
+| Cost accumulates quickly with tools | Live token and cost totals in the footer, hard round cap; tests pin a cheap model |
+| Cheap models may not invoke tools at all | Observed during model selection: several cheap models answered as if they had run a tool without calling one. Model choice for debaters is therefore a correctness concern, not only a cost one, and the UI surfaces which model each side used |
 | Debaters collapse into agreement without reasoning | Prompts explicitly reward justified movement and penalize unjustified concession; the credence chart makes a suspicious collapse visible |

@@ -9,6 +9,11 @@
 //! ```text
 //! cargo test --test opencode_integration -- --ignored --nocapture
 //! ```
+//!
+//! Every test pins an explicit cheap model rather than accepting the server
+//! default, which is a far more expensive general-purpose model. Override with
+//! `COIN_TEST_MODEL=provider/model` when a run needs different behaviour, for
+//! example a model that reliably invokes tools.
 
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +23,30 @@ use coin::opencode::events::{Flow, stream_events};
 use coin::opencode::process::OpencodeServer;
 use coin::opencode::types::ServerEvent;
 use coin::opencode::workspace;
+
+/// Model used unless `COIN_TEST_MODEL` overrides it.
+///
+/// Measured at roughly $0.0004 and one second per call, against $0.0136 and
+/// several seconds for the server's default. It answers direct instructions
+/// reliably but does not consistently invoke tools, which is acceptable here
+/// because these tests exercise coin's plumbing rather than model behaviour.
+const DEFAULT_TEST_MODEL: &str = "digitalocean/openai-gpt-oss-20b";
+
+/// Environment variable overriding [`DEFAULT_TEST_MODEL`].
+const TEST_MODEL_VAR: &str = "COIN_TEST_MODEL";
+
+/// Prompt options pinned to the configured test model.
+fn test_options() -> PromptOptions {
+    let raw = std::env::var(TEST_MODEL_VAR).unwrap_or_else(|_| DEFAULT_TEST_MODEL.to_string());
+    let model = raw
+        .parse()
+        .unwrap_or_else(|err| panic!("{TEST_MODEL_VAR} must be provider/model: {err}"));
+
+    PromptOptions {
+        agent: None,
+        model: Some(model),
+    }
+}
 
 /// Launch a server rooted at a throwaway directory.
 ///
@@ -67,7 +96,7 @@ async fn prompt_returns_a_completed_message_with_usage() {
         .prompt(
             &session.id,
             "Reply with exactly the word: pong",
-            &PromptOptions::default(),
+            &test_options(),
         )
         .await
         .expect("prompt must succeed");
@@ -121,7 +150,7 @@ async fn event_stream_delivers_text_deltas_and_an_idle_signal() {
         .prompt(
             &session.id,
             "Reply with exactly the word: pong",
-            &PromptOptions::default(),
+            &test_options(),
         )
         .await
         .expect("prompt must succeed");
@@ -155,8 +184,16 @@ async fn models_are_listed_in_provider_slash_model_form() {
     // Assert
     assert!(!models.is_empty(), "expected at least one routable model");
     assert!(
-        models.iter().all(|model| model.contains('/')),
-        "models must be provider-qualified, got {models:?}"
+        models
+            .iter()
+            .all(|model| !model.provider_id.is_empty() && !model.model_id.is_empty()),
+        "every model must be provider-qualified"
+    );
+    // Regression guard: an earlier implementation read GET /api/model, which
+    // lists only opencode's own hosted models and omits configured providers.
+    assert!(
+        models.iter().any(|model| model.provider_id != "opencode"),
+        "catalog must include configured providers, got {models:?}"
     );
 
     server.shutdown().await.expect("shutdown must succeed");

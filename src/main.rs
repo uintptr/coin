@@ -13,7 +13,7 @@ use coin::error::{CoinError, Result};
 use coin::opencode::client::{HttpClient, OpencodeClient, PromptOptions};
 use coin::opencode::events::{Flow, stream_events};
 use coin::opencode::process::OpencodeServer;
-use coin::opencode::types::{Part, ServerEvent};
+use coin::opencode::types::{ModelRef, Part, ServerEvent};
 use coin::opencode::workspace;
 
 /// How long to wait for the event stream to observe completion after the
@@ -41,8 +41,8 @@ enum Command {
         message: Vec<String>,
 
         /// Model in `provider/model` form. Defaults to the server's choice.
-        #[arg(short, long)]
-        model: Option<String>,
+        #[arg(short, long, value_parser = parse_model)]
+        model: Option<ModelRef>,
 
         /// Disable the Exa-backed web search tool.
         #[arg(long)]
@@ -78,6 +78,11 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
+/// Parse a `provider/model` argument into a reference.
+fn parse_model(value: &str) -> std::result::Result<ModelRef, String> {
+    value.parse()
+}
+
 /// Print a tool invocation as it is observed on the event stream.
 fn report_tool(part: &Part) {
     if let Part::Tool { tool, state, .. } = part {
@@ -98,7 +103,7 @@ fn report_tool(part: &Part) {
 }
 
 /// Run one prompt end to end against a freshly launched opencode server.
-async fn probe(message: String, model: Option<String>, websearch: bool) -> Result<()> {
+async fn probe(message: String, model: Option<ModelRef>, websearch: bool) -> Result<()> {
     if message.trim().is_empty() {
         return Err(CoinError::EventStream(
             "a probe message is required".to_string(),

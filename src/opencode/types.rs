@@ -163,6 +163,93 @@ impl AssistantMessage {
     }
 }
 
+/// A provider-qualified model reference.
+///
+/// opencode's prompt payload requires an **object** here, not a string: a bare
+/// `"digitalocean/kimi-k3"` is rejected with
+/// `Expected object | null, got "..."`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRef {
+    /// Provider serving the model, for example `digitalocean`.
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+    /// Model identifier within that provider.
+    #[serde(rename = "modelID")]
+    pub model_id: String,
+}
+
+impl ModelRef {
+    /// Build a reference from its two parts.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider_id` - Provider serving the model
+    /// * `model_id` - Model identifier within that provider
+    ///
+    /// # Returns
+    ///
+    /// The corresponding reference.
+    pub fn new<P, M>(provider_id: P, model_id: M) -> Self
+    where
+        P: Into<String>,
+        M: Into<String>,
+    {
+        Self {
+            provider_id: provider_id.into(),
+            model_id: model_id.into(),
+        }
+    }
+}
+
+impl std::str::FromStr for ModelRef {
+    type Err = String;
+
+    /// Parse `provider/model`, splitting on the **first** slash only.
+    ///
+    /// Model identifiers routinely contain slashes of their own, as in
+    /// `openrouter/z-ai/glm-5.2:free`, so splitting on the last slash or on
+    /// every slash would misparse them.
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.split_once('/') {
+            Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
+                Ok(Self::new(provider, model))
+            }
+            _ => Err(format!(
+                "expected a model in provider/model form, got {value:?}"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ModelRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}/{}", self.provider_id, self.model_id)
+    }
+}
+
+/// Response from `GET /config/providers`.
+///
+/// This, not `GET /api/model`, is the catalog of models the server can
+/// actually route to. `/api/model` returns only opencode's own hosted models
+/// and omits every configured provider.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProvidersResponse {
+    /// Providers the server has credentials for.
+    #[serde(default)]
+    pub providers: Vec<ProviderInfo>,
+}
+
+/// One provider and the models it offers.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderInfo {
+    /// Provider identifier, for example `digitalocean`.
+    pub id: String,
+    /// Models keyed by identifier. Values carry cost and capability detail
+    /// coin does not currently model.
+    #[serde(default)]
+    pub models: std::collections::HashMap<String, serde_json::Value>,
+}
+
 /// Request body for `POST /session/{id}/message`.
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptRequest {
@@ -171,9 +258,9 @@ pub struct PromptRequest {
     /// Agent to answer as, selecting the persona.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// Model in `provider/model` form.
+    /// Model to answer with.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub model: Option<ModelRef>,
 }
 
 /// A single outgoing message part.
@@ -399,6 +486,76 @@ mod tests {
 
         // Assert
         assert!(matches!(event, ServerEvent::Other));
+    }
+
+    #[test]
+    fn model_ref_parses_provider_and_model() {
+        // Arrange and act
+        let parsed: ModelRef = "digitalocean/openai-gpt-oss-20b"
+            .parse()
+            .expect("a well formed reference must parse");
+
+        // Assert
+        assert_eq!(parsed.provider_id, "digitalocean");
+        assert_eq!(parsed.model_id, "openai-gpt-oss-20b");
+    }
+
+    #[test]
+    fn model_ref_keeps_slashes_inside_the_model_id() {
+        // Arrange: OpenRouter identifiers embed their own slashes, so only the
+        // first separator delimits the provider.
+        let parsed: ModelRef = "openrouter/z-ai/glm-5.2:free"
+            .parse()
+            .expect("a nested identifier must parse");
+
+        // Assert
+        assert_eq!(parsed.provider_id, "openrouter");
+        assert_eq!(parsed.model_id, "z-ai/glm-5.2:free");
+    }
+
+    #[test]
+    fn model_ref_round_trips_through_display() {
+        // Arrange
+        let original = "openrouter/z-ai/glm-5.2:free";
+
+        // Act
+        let parsed: ModelRef = original.parse().expect("must parse");
+
+        // Assert
+        assert_eq!(parsed.to_string(), original);
+    }
+
+    #[test]
+    fn model_ref_rejects_input_without_a_provider() {
+        // Act and assert
+        assert!("kimi-k3".parse::<ModelRef>().is_err());
+        assert!("/kimi-k3".parse::<ModelRef>().is_err());
+        assert!("digitalocean/".parse::<ModelRef>().is_err());
+    }
+
+    #[test]
+    fn providers_response_flattens_to_model_references() {
+        // Arrange: the shape returned by GET /config/providers.
+        let raw = serde_json::json!({
+            "providers": [
+                { "id": "digitalocean", "models": { "kimi-k3": {}, "openai-gpt-oss-20b": {} } },
+                { "id": "openrouter", "models": { "z-ai/glm-5.2:free": {} } }
+            ],
+            "default": {}
+        });
+
+        // Act
+        let response: ProvidersResponse =
+            serde_json::from_value(raw).expect("providers fixture must deserialize");
+
+        // Assert
+        assert_eq!(response.providers.len(), 2);
+        let total: usize = response
+            .providers
+            .iter()
+            .map(|provider| provider.models.len())
+            .sum();
+        assert_eq!(total, 3);
     }
 
     #[test]
