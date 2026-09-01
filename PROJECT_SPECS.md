@@ -64,6 +64,35 @@ Assigning the same model to both sides is the default because it isolates the
 argument from model capability. Differing models are supported and are the more
 interesting configuration once the basics work.
 
+**The default debater model is `digitalocean/glm-5.3-flash`**, chosen by
+benchmarking candidates on real debates rather than on price alone. It costs
+roughly a fifteenth of the server default while still stating well-calibrated
+confidences. That last property is not optional: the cheaper models tried were
+faster and cheaper still, but reported low confidence in positions the evidence
+plainly supported, which corrupts the convergence reading the whole format
+rests on. One candidate produced no output at all despite being listed as
+available.
+
+Model choice is therefore a correctness decision, not only a cost one, and the
+model in use is displayed in the debate header so a suspicious result can be
+attributed.
+
+### 2.2 Command line rendering
+
+A debate streams two voices into one terminal, so the sides are coloured
+distinctly and each side's argument is written token by token as the model
+produces it, rather than appearing complete once the turn ends. Watching a
+debater change its mind mid-paragraph is most of the value of running one
+interactively.
+
+The style is opened once per turn and closed at its end, so streaming emits two
+escape sequences per turn rather than a pair per token. Tool invocations
+interrupt the stream on a dimmed line and then restore the side's colour.
+
+Styling is suppressed when standard output is not a terminal, so piping a
+debate to a file yields clean text. `NO_COLOR` disables it, `CLICOLOR_FORCE=1`
+forces it on; when both are set, suppression wins.
+
 ## 3. Architecture
 
 ```

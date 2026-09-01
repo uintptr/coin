@@ -54,13 +54,19 @@ opencode's wire format.
 | `src/debate/parse.rs` | Tolerant extraction of the trailing fenced json block |
 | `src/debate/credence.rs` | The credence-updating format |
 | `src/debate/engine.rs` | Orchestrator: two sessions, alternating turns, stop conditions |
-| `src/main.rs` | `coin debate` |
+| `src/term.rs` | Terminal colour, honouring NO_COLOR and non-TTY output |
+| `src/main.rs` | `coin debate`, with live per-side colour streaming |
 
 Personas are delivered as generated agent files, which replace opencode's
 built-in coding prompt rather than adding to it. Each debate gets a disposable
 git-initialized workspace.
 
-**Tests:** 83 unit tests plus 5 doctests run offline and free. 4 integration
+Arguments stream token by token in a colour per side, with the model named in
+the header. The default debater model is `digitalocean/glm-5.3-flash`, picked by
+benchmarking on real debates: about a fifteenth the cost of the previous default
+while still well calibrated.
+
+**Tests:** 92 unit tests plus 6 doctests run offline and free. 4 integration
 tests marked `#[ignore]` drive a real server, take about 5 seconds, and cost
 well under a cent.
 
@@ -130,15 +136,17 @@ rediscovered:
 - **Personas versus a long-lived server.** Agent files are read at opencode
   startup. The CLI writes both personas then launches, but a web server outlives
   many debates. Blocks step 6; see "Next session".
-- **Debate cost is material.** A four-turn debate with kimi-k3 and web search
-  cost about $0.24. The UI must surface running cost, and a cheaper default for
-  debaters is worth investigating.
+- **Debate cost.** Now roughly $0.008 for a two-turn debate on the default
+  model, down from about $0.24 per four turns on kimi-k3. Still worth surfacing
+  running cost in the UI.
+- **Speed varies enormously by model.** The default takes around 90 seconds per
+  turn with web search. One candidate needed over 400 seconds for two rounds.
+  Slow turns will matter more once a browser is waiting on them.
+- **Reasoning still leaks into visible text.** Some models stream their internal
+  monologue as ordinary argument. Turn cards will need to handle it.
 - **Cheap models may fabricate tool use.** Several answered as though they had
   run a tool without calling one. Model choice for debaters is a correctness
   concern, not only a cost one.
-- **Reasoning leaks into visible text.** Some models stream their internal
-  monologue as ordinary text rather than as a `reasoning` part. Turn cards will
-  need to handle this or debate transcripts will be noisy.
 - **A listed model is not necessarily usable.** DigitalOcean rejects parts of
   its catalog with subscription-tier and not-found errors, surfacing as an
   opaque `UnknownError` with the real cause only in the server log.
@@ -150,8 +158,8 @@ cargo run -- debate \
   -q "the question under dispute" \
   -a "the case for side A" \
   -b "the case for side B" \
-  -m digitalocean/kimi-k3 \
-  -r 2                        # max rounds; --model-b to differ the two sides
+  -r 2                        # max rounds; -m to pick a model,
+                              # --model-b to differ the two sides
 
 cargo run -- probe "your question"                           # one prompt, streamed
 cargo run -- probe -m digitalocean/openai-gpt-oss-20b "..."  # pick a model
@@ -160,6 +168,10 @@ RUST_LOG=coin=debug cargo run -- probe "..."                 # verbose
 
 Only the `credence` format is implemented; the other three are step 7 and are
 rejected with a clear message.
+
+Arguments stream live in colour, cyan for side A and magenta for side B.
+Styling switches off automatically when output is redirected; `NO_COLOR`
+disables it and `CLICOLOR_FORCE=1` forces it on through a pipe.
 
 stdout carries the model's text, stderr everything else, so it pipes cleanly.
 

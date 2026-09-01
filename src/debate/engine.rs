@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::debate::format::DebateFormat;
-use crate::debate::state::{DebateState, Side, StopReason, Topic};
+use crate::debate::state::{DebateState, Side, StopReason, Topic, Turn};
 use crate::error::Result;
 use crate::opencode::client::{OpencodeClient, PromptOptions};
 use crate::opencode::types::{AssistantMessage, ModelRef, Tokens, ToolCall};
@@ -94,10 +94,10 @@ pub enum Progress {
         round: usize,
     },
     /// A side finished speaking.
-    TurnCompleted {
-        /// Index of the recorded turn.
-        index: usize,
-    },
+    ///
+    /// Carries the completed turn so a caller can render its analysis without
+    /// waiting for the debate to finish.
+    TurnCompleted(Box<Turn>),
     /// The debate ended.
     Finished {
         /// Why it ended.
@@ -157,6 +157,15 @@ where
             session_a,
             session_b,
         })
+    }
+
+    /// Session identifier for a side.
+    ///
+    /// Exposed so a caller can map opencode event-stream traffic back to the
+    /// side that produced it, which is how live token streaming is rendered
+    /// without the engine itself depending on a concrete transport.
+    pub fn session_id(&self, side: Side) -> &str {
+        self.session(side)
     }
 
     /// Session identifier for a side.
@@ -230,7 +239,9 @@ where
 
             on_progress(Progress::TurnStarted { side, round });
             let index = self.take_turn(&mut state, side).await?;
-            on_progress(Progress::TurnCompleted { index });
+            if let Some(turn) = state.turns.get(index) {
+                on_progress(Progress::TurnCompleted(Box::new(turn.clone())));
+            }
 
             // Stop conditions are only meaningful on a complete round, so that
             // both sides have answered the same exchange.

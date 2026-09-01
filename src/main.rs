@@ -20,11 +20,21 @@ use coin::opencode::events::{Flow, stream_events};
 use coin::opencode::process::OpencodeServer;
 use coin::opencode::types::{ModelRef, Part, ServerEvent};
 use coin::opencode::workspace;
+use coin::term::{self, Style, paint};
 
 /// How long to wait for the event stream to observe completion after the
 /// prompt returns. The idle event normally arrives first, so this is a
 /// backstop rather than an expected wait.
 const EVENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Model debaters use unless one is given.
+///
+/// Chosen by benchmarking candidates on a real debate. It costs roughly a
+/// fifteenth of the server default (kimi-k3) while still stating
+/// well-calibrated confidences, which is what the credence format depends on:
+/// cheaper models were faster still but reported low confidence in positions
+/// the evidence plainly supported, which corrupts the convergence reading.
+const DEFAULT_DEBATE_MODEL: &str = "digitalocean/glm-5.3-flash";
 
 /// Structured debate between two LLM debaters, streamed to a web UI.
 #[derive(Debug, Parser)]
@@ -125,14 +135,40 @@ async fn run(cli: Cli) -> Result<()> {
             model_b,
             no_websearch,
         } => {
+            let default = DEFAULT_DEBATE_MODEL
+                .parse()
+                .map_err(|reason: String| CoinError::EventStream(reason))?;
+            let model_a = model.clone().unwrap_or(default);
             let config = DebateConfig {
                 topic: Topic::new(question, position_a, position_b),
                 max_rounds,
-                model_a: model.clone(),
-                model_b: model_b.or(model),
+                model_b: Some(model_b.or(model).unwrap_or_else(|| model_a.clone())),
+                model_a: Some(model_a),
             };
             debate(config, format, !no_websearch).await
         }
+    }
+}
+
+/// Describe which model each side will argue with.
+///
+/// The two sides usually share a model, which isolates the argument from model
+/// capability, so that case is collapsed to a single line.
+fn describe_models(config: &DebateConfig) -> String {
+    let name = |model: &Option<ModelRef>| {
+        model
+            .as_ref()
+            .map_or_else(|| "server default".to_string(), ModelRef::to_string)
+    };
+
+    if config.model_a == config.model_b {
+        format!("  model {}", name(&config.model_a))
+    } else {
+        format!(
+            "  model A {}, model B {}",
+            name(&config.model_a),
+            name(&config.model_b)
+        )
     }
 }
 
@@ -173,65 +209,139 @@ async fn debate(config: DebateConfig, format_id: FormatId, websearch: bool) -> R
         server.password(),
     ));
 
-    println!("QUESTION  {}", config.topic.question);
-    println!("SIDE A    {}", config.topic.position_a);
-    println!("SIDE B    {}", config.topic.position_b);
+    println!("{}", paint(Style::Heading, &config.topic.question));
     println!(
-        "FORMAT    {format_id} ({}), max {} rounds\n",
-        format_id.stop_description(),
-        config.max_rounds
+        "  {} {}",
+        paint(Style::SideA, "A:"),
+        config.topic.position_a
     );
+    println!(
+        "  {} {}",
+        paint(Style::SideB, "B:"),
+        config.topic.position_b
+    );
+    println!(
+        "{}",
+        paint(
+            Style::Dim,
+            format!(
+                "  {format_id} format, ends when {}, max {} rounds",
+                format_id.stop_description(),
+                config.max_rounds
+            )
+        )
+    );
+    println!("{}", paint(Style::Dim, describe_models(&config)));
 
     let engine = Engine::new(Arc::clone(&client), format, config).await?;
 
+    // Stream tokens live by consuming the opencode event bus alongside the
+    // debate, routing each session's output to the side that owns it. The
+    // engine stays transport-agnostic; only this rendering path knows about
+    // the event stream.
+    let sessions = [
+        (engine.session_id(Side::A).to_string(), Side::A),
+        (engine.session_id(Side::B).to_string(), Side::B),
+    ];
+    let stream_client = (*client).clone();
+    let streamer = tokio::spawn(async move {
+        stream_events(&stream_client, move |event| {
+            let side_of = |id: &str| {
+                sessions
+                    .iter()
+                    .find(|(session, _)| session == id)
+                    .map(|(_, side)| *side)
+            };
+
+            match event {
+                ServerEvent::PartDelta(delta) if delta.is_text() => {
+                    // The style is opened once per turn, so fragments are
+                    // written raw rather than wrapped individually.
+                    if side_of(&delta.session_id).is_some() {
+                        print!("{}", delta.delta);
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+                ServerEvent::PartUpdated(update) => {
+                    if let Some(side) = side_of(&update.part.session_id)
+                        && let Some(line) = tool_line(&update.part.part)
+                    {
+                        // Interrupt the streamed argument for a tool line, then
+                        // restore the side's colour for the text that follows.
+                        println!(
+                            "\n{}{}",
+                            paint(Style::Dim, line),
+                            term::start(Style::for_side(side))
+                        );
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+                _ => {}
+            }
+            Flow::Continue
+        })
+        .await
+    });
+
     let state = engine
-        .run(|progress| {
-            if let Progress::TurnStarted { side, round } = progress {
-                println!("--- Round {round}, Debater {side} ---");
+        .run(|progress| match progress {
+            Progress::TurnStarted { side, round } => {
+                // Open the side's colour here so streamed fragments inherit it.
+                print!(
+                    "\n{}\n{}",
+                    paint(
+                        Style::for_side(side),
+                        format!("--- Round {round}, Debater {side} ---")
+                    ),
+                    term::start(Style::for_side(side))
+                );
                 let _ = std::io::stdout().flush();
             }
+            Progress::TurnCompleted(turn) => print_turn_analysis(&turn),
+            Progress::Finished { .. } => {}
         })
         .await?;
 
-    for turn in &state.turns {
-        print_turn(turn);
-    }
+    // The debate is over, so nothing further will arrive on the stream.
+    streamer.abort();
 
     print_summary(&state);
     server.shutdown().await
 }
 
-/// Print one completed turn.
-fn print_turn(turn: &coin::debate::state::Turn) {
-    println!("\n=== Round {} | Debater {} ===", turn.round, turn.side);
-
-    for call in &turn.tool_calls {
-        if call.detail.is_empty() {
-            println!("  [{} {}]", call.status, call.tool);
-        } else {
-            println!("  [{} {}: {}]", call.status, call.tool, call.detail);
-        }
-    }
-
-    println!("{}", turn.text);
+/// Print the structured findings that follow a turn's prose.
+///
+/// The prose itself has already been streamed token by token, so only the
+/// extracted analysis is printed here.
+fn print_turn_analysis(turn: &coin::debate::state::Turn) {
+    // Close the colour opened when the turn started.
+    println!("{}", term::reset());
 
     if let Some(credence) = turn.analysis.credence {
-        println!("  confidence: {credence}");
+        println!(
+            "  {} {}",
+            paint(Style::Dim, "confidence:"),
+            paint(Style::Value, credence.to_string())
+        );
     }
     if let Some(reason) = &turn.analysis.moved_because {
-        println!("  moved because: {reason}");
+        println!("  {} {reason}", paint(Style::Dim, "moved because:"));
     }
     for conceded in &turn.analysis.conceded {
-        println!("  conceded: {conceded}");
+        println!("  {} {conceded}", paint(Style::Dim, "conceded:"));
     }
     if !turn.analysis.parse_status.is_ok() {
-        println!("  (no readable structured block in this turn)");
+        println!(
+            "  {}",
+            paint(Style::Dim, "(no readable structured block in this turn)")
+        );
     }
+    let _ = std::io::stdout().flush();
 }
 
 /// Print the closing summary, including the convergence series.
 fn print_summary(state: &DebateState) {
-    println!("\n=== Result ===");
+    println!("\n{}", paint(Style::Heading, "Result"));
 
     let series_a = state.credence_series(Side::A);
     let series_b = state.credence_series(Side::B);
@@ -240,7 +350,13 @@ fn print_summary(state: &DebateState) {
         // Each side reports confidence in its own position, so the gap column
         // restates them on a single proposition. Without it, two sides that
         // fully agree look maximally far apart.
-        println!("confidence in own position, and how far apart that leaves them:");
+        println!(
+            "{}",
+            paint(
+                Style::Dim,
+                "confidence in own position, and how far apart that leaves them:"
+            )
+        );
         for round in 0..series_a.len().max(series_b.len()) {
             let format_value = |series: &[Credence]| {
                 series
@@ -252,11 +368,14 @@ fn print_summary(state: &DebateState) {
                 _ => "  -".to_string(),
             };
             println!(
-                "  round {}   A {}   B {}   gap {}",
+                "  round {}   {} {}   {} {}   {} {}",
                 round + 1,
+                paint(Style::SideA, "A"),
                 format_value(&series_a),
+                paint(Style::SideB, "B"),
                 format_value(&series_b),
-                gap,
+                paint(Style::Dim, "gap"),
+                paint(Style::Value, gap),
             );
         }
     }
@@ -273,11 +392,17 @@ fn print_summary(state: &DebateState) {
 
     let tokens = state.total_tokens();
     println!(
-        "{} turns | {} in, {} out | ${:.4}",
-        state.turns.len(),
-        tokens.input,
-        tokens.output,
-        state.total_cost()
+        "{}",
+        paint(
+            Style::Dim,
+            format!(
+                "{} turns | {} in, {} out | ${:.4}",
+                state.turns.len(),
+                tokens.input,
+                tokens.output,
+                state.total_cost()
+            )
+        )
     );
 }
 
@@ -286,23 +411,22 @@ fn parse_model(value: &str) -> std::result::Result<ModelRef, String> {
     value.parse()
 }
 
-/// Print a tool invocation as it is observed on the event stream.
-fn report_tool(part: &Part) {
-    if let Part::Tool { tool, state, .. } = part {
-        let detail = state
-            .input
-            .get("command")
-            .or_else(|| state.input.get("query"))
-            .or_else(|| state.input.get("url"))
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
+/// Render a tool invocation as one line, if the part is a tool call.
+///
+/// Formatting is separated from the destination because the two commands want
+/// different streams: `probe` keeps tool noise on stderr so stdout carries only
+/// the model's text, while a debate treats tool use as part of the transcript.
+fn tool_line(part: &Part) -> Option<String> {
+    let Part::Tool { tool, state, .. } = part else {
+        return None;
+    };
 
-        if detail.is_empty() {
-            eprintln!("\n  [{} {}]", state.status, tool);
-        } else {
-            eprintln!("\n  [{} {}: {}]", state.status, tool, detail);
-        }
-    }
+    let detail = state.summary();
+    Some(if detail.is_empty() {
+        format!("  [{} {}]", state.status, tool)
+    } else {
+        format!("  [{} {}: {}]", state.status, tool, detail)
+    })
 }
 
 /// Run one prompt end to end against a freshly launched opencode server.
@@ -342,7 +466,9 @@ async fn probe(message: String, model: Option<ModelRef>, websearch: bool) -> Res
                 Flow::Continue
             }
             ServerEvent::PartUpdated(update) if update.part.session_id == watched_session => {
-                report_tool(&update.part.part);
+                if let Some(line) = tool_line(&update.part.part) {
+                    eprintln!("\n{line}");
+                }
                 Flow::Continue
             }
             ServerEvent::SessionIdle(idle) if idle.session_id == watched_session => Flow::Stop,
