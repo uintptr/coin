@@ -1,7 +1,7 @@
 //! Command line entry point for coin.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -68,15 +68,15 @@ enum Command {
 
     /// Run a debate between two models and print the transcript as it happens.
     Debate {
-        /// The question under dispute.
+        /// The question under dispute, or a file containing it.
         #[arg(short, long)]
         question: String,
 
-        /// The case assigned to side A.
+        /// The case assigned to side A, or a file containing it.
         #[arg(short = 'a', long)]
         position_a: String,
 
-        /// The case assigned to side B.
+        /// The case assigned to side B, or a file containing it.
         #[arg(short = 'b', long)]
         position_b: String,
 
@@ -124,6 +124,83 @@ async fn main() {
     }
 }
 
+/// File extensions treated as naming a text file.
+const TEXT_EXTENSIONS: [&str; 3] = ["txt", "md", "text"];
+
+/// Whether a value that does not exist on disk was probably meant as a path.
+///
+/// A debate position is prose and almost always contains spaces, so a
+/// whitespace-free value that carries a separator or a text extension is far
+/// more likely to be a mistyped filename than an argument. Reporting that as a
+/// missing file beats silently debating the literal string `notes/postion.md`.
+///
+/// Whitespace is checked first so a genuine question containing a slash, such
+/// as "Is TCP/IP better than X?", stays a literal string.
+fn looks_like_path(value: &str) -> bool {
+    if value.contains(char::is_whitespace) || value.is_empty() {
+        return false;
+    }
+
+    value.contains('/')
+        || value.starts_with('~')
+        || Path::new(value)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                TEXT_EXTENSIONS
+                    .iter()
+                    .any(|known| extension.eq_ignore_ascii_case(known))
+            })
+}
+
+/// Resolve an argument that may name a file or may be the text itself.
+///
+/// Long positions are easier to keep in a file than to paste into a shell, so
+/// each of the topic arguments accepts either. An existing file is read; any
+/// other value is used verbatim.
+///
+/// # Arguments
+///
+/// * `label` - Name of the argument, used in error messages
+/// * `value` - The raw argument
+///
+/// # Returns
+///
+/// The file's contents, trimmed, or the original value.
+///
+/// # Errors
+///
+/// Returns [`CoinError::Io`] if an existing file cannot be read, and
+/// [`CoinError::EventStream`] if the file is empty or if the value looks like a
+/// path that does not exist.
+async fn text_or_file(label: &str, value: String) -> Result<String> {
+    let path = Path::new(&value);
+
+    if path.is_file() {
+        let contents = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|source| CoinError::io(path, source))?;
+
+        if contents.trim().is_empty() {
+            return Err(CoinError::Invalid(format!(
+                "{label} file {} is empty",
+                path.display()
+            )));
+        }
+        return Ok(contents.trim().to_string());
+    }
+
+    // A missing file is only an error when the value was clearly meant as one.
+    if looks_like_path(&value) {
+        return Err(CoinError::Invalid(format!(
+            "{label} looks like a file path but {value} does not exist; \
+             pass the text directly if that was intended"
+        )));
+    }
+
+    Ok(value)
+}
+
 /// Dispatch the parsed command.
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -143,12 +220,14 @@ async fn run(cli: Cli) -> Result<()> {
             save,
             no_websearch,
         } => {
-            let default = DEFAULT_DEBATE_MODEL
-                .parse()
-                .map_err(|reason: String| CoinError::EventStream(reason))?;
+            let default = DEFAULT_DEBATE_MODEL.parse().map_err(CoinError::Invalid)?;
             let model_a = model.clone().unwrap_or(default);
             let config = DebateConfig {
-                topic: Topic::new(question, position_a, position_b),
+                topic: Topic::new(
+                    text_or_file("question", question).await?,
+                    text_or_file("position A", position_a).await?,
+                    text_or_file("position B", position_b).await?,
+                ),
                 max_rounds,
                 model_b: Some(model_b.or(model).unwrap_or_else(|| model_a.clone())),
                 model_a: Some(model_a),
@@ -188,7 +267,7 @@ async fn debate(
     save: Option<PathBuf>,
 ) -> Result<()> {
     let Some(format) = format_for(format_id) else {
-        return Err(CoinError::EventStream(format!(
+        return Err(CoinError::Invalid(format!(
             "format {format_id} is specified but not implemented yet; \
              only 'credence' is available so far"
         )));
@@ -476,7 +555,7 @@ fn tool_line(part: &Part) -> Option<String> {
 /// Run one prompt end to end against a freshly launched opencode server.
 async fn probe(message: String, model: Option<ModelRef>, websearch: bool) -> Result<()> {
     if message.trim().is_empty() {
-        return Err(CoinError::EventStream(
+        return Err(CoinError::Invalid(
             "a probe message is required".to_string(),
         ));
     }
@@ -541,4 +620,110 @@ async fn probe(message: String, model: Option<ModelRef>, websearch: bool) -> Res
     );
 
     server.shutdown().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a scratch file and return its path.
+    async fn scratch_file(label: &str, contents: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("coin-arg-test-{label}-{}.md", std::process::id()));
+        tokio::fs::write(&path, contents)
+            .await
+            .expect("scratch file must be writable");
+        path
+    }
+
+    #[tokio::test]
+    async fn an_existing_file_is_read() {
+        // Arrange
+        let path = scratch_file("read", "  The case for X.\n").await;
+
+        // Act
+        let resolved = text_or_file("position A", path.display().to_string())
+            .await
+            .expect("an existing file must be read");
+
+        // Assert: contents are trimmed, since a trailing newline is an
+        // artefact of the file rather than part of the argument.
+        assert_eq!(resolved, "The case for X.");
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn ordinary_prose_is_used_verbatim() {
+        // Act
+        let resolved = text_or_file("question", "Is X true?".to_string())
+            .await
+            .expect("prose must pass through");
+
+        // Assert
+        assert_eq!(resolved, "Is X true?");
+    }
+
+    #[tokio::test]
+    async fn a_question_containing_a_slash_stays_a_string() {
+        // Arrange: this is the case that makes a naive path check wrong.
+        let question = "Is TCP/IP better than the OSI model?".to_string();
+
+        // Act
+        let resolved = text_or_file("question", question.clone())
+            .await
+            .expect("a question with a slash must not be treated as a path");
+
+        // Assert
+        assert_eq!(resolved, question);
+    }
+
+    #[tokio::test]
+    async fn a_mistyped_path_is_reported_rather_than_debated() {
+        // Arrange: the footgun of the file-or-string rule is that a typo
+        // silently becomes the argument.
+        let result = text_or_file("position A", "notes/postion.md".to_string()).await;
+
+        // Assert
+        let error = result.expect_err("a missing path must be reported");
+        assert!(error.to_string().contains("does not exist"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_empty_file_is_rejected() {
+        // Arrange: an empty position would produce a meaningless debate.
+        let path = scratch_file("empty", "   \n").await;
+
+        // Act
+        let result = text_or_file("question", path.display().to_string()).await;
+
+        // Assert
+        let error = result.expect_err("an empty file must be rejected");
+        assert!(error.to_string().contains("empty"), "{error}");
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[test]
+    fn path_like_values_are_recognised() {
+        assert!(looks_like_path("notes/question.md"));
+        assert!(looks_like_path("question.txt"));
+        assert!(looks_like_path("~/debates/a.md"));
+        assert!(looks_like_path("./a.text"));
+    }
+
+    #[test]
+    fn prose_is_not_mistaken_for_a_path() {
+        // Anything with whitespace is prose, whatever else it contains.
+        assert!(!looks_like_path("Is X true?"));
+        assert!(!looks_like_path("Is TCP/IP better?"));
+        assert!(!looks_like_path("see notes.md for detail"));
+        assert!(!looks_like_path(""));
+    }
+
+    #[test]
+    fn a_bare_word_is_not_a_path() {
+        // A single word with no separator or text extension is more likely a
+        // terse position than a filename.
+        assert!(!looks_like_path("yes"));
+        assert!(!looks_like_path("X"));
+    }
 }

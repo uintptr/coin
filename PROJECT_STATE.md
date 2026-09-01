@@ -70,7 +70,8 @@ while still well calibrated.
 Every debate auto-saves `transcript.json` and `transcript.md` into its
 workspace; `--save FILE` writes an extra copy anywhere.
 
-**Tests:** 112 unit tests plus 6 doctests run offline and free. 4 integration
+**Tests:** 112 library tests, 8 binary tests, and 6 doctests run offline and
+free. 4 integration
 tests marked `#[ignore]` drive a real server, take about 5 seconds, and cost
 well under a cent.
 
@@ -181,6 +182,10 @@ cargo run -- probe "your question"                           # one prompt, strea
 cargo run -- probe -m digitalocean/openai-gpt-oss-20b "..."  # pick a model
 RUST_LOG=coin=debug cargo run -- probe "..."                 # verbose
 ```
+
+`-q`, `-a` and `-b` accept either literal text or a path to a file holding it,
+which is easier for positions that run to paragraphs. A value that looks like a
+path but does not exist is rejected rather than debated literally.
 
 Only the `credence` format is implemented; the other three are step 7 and are
 rejected with a clear message.

@@ -97,6 +97,13 @@ pub enum CoinError {
         source: std::io::Error,
     },
 
+    /// A command line argument or configuration value was not usable.
+    ///
+    /// Carries a complete, user-facing sentence: these are reported straight to
+    /// the operator, who does not need a prefix naming an internal subsystem.
+    #[error("{0}")]
+    Invalid(String),
+
     /// A required directory could not be determined from the environment.
     #[error("could not determine the {0} directory for this platform")]
     MissingDirectory(&'static str),

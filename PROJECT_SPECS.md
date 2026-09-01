@@ -77,6 +77,21 @@ Model choice is therefore a correctness decision, not only a cost one, and the
 model in use is displayed in the debate header so a suspicious result can be
 attributed.
 
+### 2.1a Topic arguments accept a file or a string
+
+The question and both positions accept either literal text or a path to a file
+containing it. A position argued well is often several paragraphs, which is
+awkward to paste into a shell and easy to lose. An existing file is read and
+trimmed; any other value is used verbatim.
+
+The obvious hazard of that rule is a mistyped filename silently becoming the
+argument, so a debate runs about the literal string `notes/postion.md`. A value
+that does not exist is therefore rejected when it **looks** like a path:
+no whitespace, and either a separator, a leading `~`, or a `.txt`, `.md`, or
+`.text` extension. Whitespace is checked first so a genuine question containing
+a slash, such as "Is TCP/IP better than the OSI model?", stays a literal
+string. An empty file is an error rather than an empty position.
+
 ### 2.2 Transcripts
 
 **Every debate is saved without being asked for.** A debate costs real money
