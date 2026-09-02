@@ -32,14 +32,14 @@ remains as a single-prompt diagnostic.
 
 ### Step 3-4: opencode integration
 
-| Module | What it does |
-|---|---|
-| `src/opencode/process.rs` | Spawns `opencode serve --port 0`, parses the port from stdout, polls `/api/health`, kills the child on drop |
-| `src/opencode/client.rs` | `OpencodeClient` trait plus `HttpClient`: sessions, prompt, abort, model listing |
-| `src/opencode/events.rs` | Consumes the `/event` SSE bus, decodes to `ServerEvent`, hands to a handler returning `Flow::Continue`/`Stop` |
-| `src/opencode/types.rs` | Wire types: `ModelRef`, `Part`, `AssistantMessage`, `ServerEvent`, `ProvidersResponse` |
-| `src/opencode/workspace.rs` | Prepares a directory as an opencode project, including the required `git init` |
-| `src/main.rs` | `coin probe` |
+| Module                      | What it does                                                                                                  |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `src/opencode/process.rs`   | Spawns `opencode serve --port 0`, parses the port from stdout, polls `/api/health`, kills the child on drop   |
+| `src/opencode/client.rs`    | `OpencodeClient` trait plus `HttpClient`: sessions, prompt, abort, model listing                              |
+| `src/opencode/events.rs`    | Consumes the `/event` SSE bus, decodes to `ServerEvent`, hands to a handler returning `Flow::Continue`/`Stop` |
+| `src/opencode/types.rs`     | Wire types: `ModelRef`, `Part`, `AssistantMessage`, `ServerEvent`, `ProvidersResponse`                        |
+| `src/opencode/workspace.rs` | Prepares a directory as an opencode project, including the required `git init`                                |
+| `src/main.rs`               | `coin probe`                                                                                                  |
 
 `OpencodeClient` is a trait from the outset so the engine can be tested against
 a mock with no network and no model spend. Nothing outside `src/opencode/` knows
@@ -47,16 +47,16 @@ opencode's wire format.
 
 ### Step 5: the debate engine
 
-| Module | What it does |
-|---|---|
-| `src/debate/state.rs` | `Side`, `Topic`, `Credence`, `Claim`, `TurnAnalysis`, `Turn`, `StopReason`, `DebateState` |
-| `src/debate/format.rs` | `DebateFormat` trait, `FormatId`, and the shared truth-seeking mandate |
-| `src/debate/parse.rs` | Tolerant extraction of the trailing fenced json block |
-| `src/debate/credence.rs` | The credence-updating format |
-| `src/debate/engine.rs` | Orchestrator: two sessions, alternating turns, stop conditions |
-| `src/store.rs` | Transcript persistence: versioned JSON plus readable Markdown |
-| `src/term.rs` | Terminal colour, honouring NO_COLOR and non-TTY output |
-| `src/main.rs` | `coin debate`, live per-side colour streaming, file-or-string topic arguments |
+| Module                   | What it does                                                                              |
+| ------------------------ | ----------------------------------------------------------------------------------------- |
+| `src/debate/state.rs`    | `Side`, `Topic`, `Credence`, `Claim`, `TurnAnalysis`, `Turn`, `StopReason`, `DebateState` |
+| `src/debate/format.rs`   | `DebateFormat` trait, `FormatId`, and the shared truth-seeking mandate                    |
+| `src/debate/parse.rs`    | Tolerant extraction of the trailing fenced json block                                     |
+| `src/debate/credence.rs` | The credence-updating format                                                              |
+| `src/debate/engine.rs`   | Orchestrator: two sessions, alternating turns, stop conditions                            |
+| `src/store.rs`           | Transcript persistence: versioned JSON plus readable Markdown                             |
+| `src/term.rs`            | Terminal colour, honouring NO_COLOR and non-TTY output                                    |
+| `src/main.rs`            | `coin debate`, live per-side colour streaming, file-or-string topic arguments             |
 
 Personas are delivered as generated agent files, which replace opencode's
 built-in coding prompt rather than adding to it. Each debate gets a disposable
@@ -78,15 +78,15 @@ free. 4 integration tests marked `#[ignore]` drive a real server, take about
 
 Everything below is unbuilt.
 
-| Step | Work | Notes |
-|---|---|---|
-| 6 | axum server, the section 9 API, snapshot-first SSE, minimal UI | **Start here** |
-| 7 | Remaining three formats: crux-finding, classic rounds, claim ledger | |
-| 8 | Intervention commands: pause, resume, step, inject, reroll, edit, abort | |
-| 9 | Permission and question cards in the UI | Needed because debaters have full tool access |
-| 10 | Judge pass; transcript persistence is already done | |
-| 11 | Analysis rail: convergence chart, claim ledger, crux tree | Chart geometry computed in Rust, JS only emits SVG |
-| 12 | Optional, post-v1: `/api/openapi.json` | Deferred until types settle |
+| Step | Work                                                                    | Notes                                              |
+| ---- | ----------------------------------------------------------------------- | -------------------------------------------------- |
+| 6    | axum server, the section 9 API, snapshot-first SSE, minimal UI          | **Start here**                                     |
+| 7    | Remaining three formats: crux-finding, classic rounds, claim ledger     |                                                    |
+| 8    | Intervention commands: pause, resume, step, inject, reroll, edit, abort |                                                    |
+| 9    | Permission and question cards in the UI                                 | Needed because debaters have full tool access      |
+| 10   | Judge pass; transcript persistence is already done                      |                                                    |
+| 11   | Analysis rail: convergence chart, claim ledger, crux tree               | Chart geometry computed in Rust, JS only emits SVG |
+| 12   | Optional, post-v1: `/api/openapi.json`                                  | Deferred until types settle                        |
 
 ## Next session: start here
 
@@ -232,15 +232,15 @@ is usually wrong.
 
 What to touch, and when:
 
-| Trigger | Update |
-|---|---|
-| A build-order step finishes | Move it from "Not done" to "Done"; rewrite "Next session: start here" for the new next step |
-| A design decision is made | `PROJECT_SPECS.md` first, then note here only if it changes what is left to build |
-| An upstream dependency surprises us | Add to "Upstream facts", with the detail in `PROJECT_SPECS.md` section 5 |
-| A question is raised that is not answered now | Add to "Open questions", saying what it blocks |
-| A question gets answered | Delete it from "Open questions" — resolved items are noise |
-| A command, flag, or test workflow changes | Update "Running it" |
-| Any of the above | Bump "Last updated" |
+| Trigger                                       | Update                                                                                      |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| A build-order step finishes                   | Move it from "Not done" to "Done"; rewrite "Next session: start here" for the new next step |
+| A design decision is made                     | `PROJECT_SPECS.md` first, then note here only if it changes what is left to build           |
+| An upstream dependency surprises us           | Add to "Upstream facts", with the detail in `PROJECT_SPECS.md` section 5                    |
+| A question is raised that is not answered now | Add to "Open questions", saying what it blocks                                              |
+| A question gets answered                      | Delete it from "Open questions" — resolved items are noise                                  |
+| A command, flag, or test workflow changes     | Update "Running it"                                                                         |
+| Any of the above                              | Bump "Last updated"                                                                         |
 
 Two habits that keep it honest: prefer deleting stale content over accumulating
 it, and keep "Next session: start here" specific enough to act on without

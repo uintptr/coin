@@ -47,18 +47,18 @@ edit a turn, or abort at any point.
 
 ### 2.1 Inputs
 
-| Field | Type | Notes |
-|---|---|---|
-| Question | text | The proposition under dispute |
-| Position A | text | The case the first debater is assigned |
-| Position B | text | The case the second debater is assigned |
-| Format | enum | One of the four in section 4 |
-| Model A / B / Judge | string | `provider/model`, defaults to the same model on both sides |
-| Max rounds | integer | Hard cap, default 3 |
-| Tools enabled | multi | Defaults from detected tool availability |
-| Judge summary | bool | Default on |
-| Step mode | bool | Default off; pause after every turn |
-| Auto-approve | bool | Default off; see section 7 |
+| Field               | Type    | Notes                                                      |
+| ------------------- | ------- | ---------------------------------------------------------- |
+| Question            | text    | The proposition under dispute                              |
+| Position A          | text    | The case the first debater is assigned                     |
+| Position B          | text    | The case the second debater is assigned                    |
+| Format              | enum    | One of the four in section 4                               |
+| Model A / B / Judge | string  | `provider/model`, defaults to the same model on both sides |
+| Max rounds          | integer | Hard cap, default 3                                        |
+| Tools enabled       | multi   | Defaults from detected tool availability                   |
+| Judge summary       | bool    | Default on                                                 |
+| Step mode           | bool    | Default off; pause after every turn                        |
+| Auto-approve        | bool    | Default off; see section 7                                 |
 
 Assigning the same model to both sides is the default because it isolates the
 argument from model capability. Differing models are supported and are the more
@@ -218,8 +218,7 @@ failure mode.
 
 **Convergence is `abs(a + b - 100) <= 15`, not `abs(a - b)`.** Each side reports
 confidence in **its own** assigned position, so the two numbers describe
-different propositions. When the sides agree, one is near 0 and the other near
-100. Comparing them directly reports maximum disagreement at the exact moment
+different propositions. When the sides agree, one is near 0 and the other near 100. Comparing them directly reports maximum disagreement at the exact moment
 the debate has succeeded, and reports agreement when both sides are certain of
 opposing positions. Restating B's confidence on A's proposition is `100 - b`,
 which makes the gap `abs(a - (100 - b))`.
@@ -309,19 +308,19 @@ surface under `/api/*` that wraps responses in `{"data": ...}`. We use the
 legacy routes for session work, where the response shape is flatter, and v2 for
 health and model listing.
 
-| Purpose | Call |
-|---|---|
-| Health | `GET /api/health` |
-| Model list | `GET /config/providers` |
-| Tool availability | `GET /experimental/tool` |
-| Create session | `POST /session` |
-| Send turn | `POST /session/{id}/message` |
-| Abort turn | `POST /session/{id}/abort` |
-| Delete message (reroll) | `DELETE /session/{id}/message/{messageID}` |
-| Patch part (edit) | `PATCH /session/{id}/message/{messageID}/part/{partID}` |
-| Answer permission | `POST /session/{id}/permissions/{permissionID}` |
-| Answer question | `POST /session/{id}/question/{requestID}/reply` |
-| Event stream | `GET /event` |
+| Purpose                 | Call                                                    |
+| ----------------------- | ------------------------------------------------------- |
+| Health                  | `GET /api/health`                                       |
+| Model list              | `GET /config/providers`                                 |
+| Tool availability       | `GET /experimental/tool`                                |
+| Create session          | `POST /session`                                         |
+| Send turn               | `POST /session/{id}/message`                            |
+| Abort turn              | `POST /session/{id}/abort`                              |
+| Delete message (reroll) | `DELETE /session/{id}/message/{messageID}`              |
+| Patch part (edit)       | `PATCH /session/{id}/message/{messageID}/part/{partID}` |
+| Answer permission       | `POST /session/{id}/permissions/{permissionID}`         |
+| Answer question         | `POST /session/{id}/question/{requestID}/reply`         |
+| Event stream            | `GET /event`                                            |
 
 The prompt payload accepts `agent`, `model`, and `variant` alongside `parts`, so
 persona and model are selectable per turn without recreating a session.
@@ -347,15 +346,15 @@ these clearly rather than presenting the whole catalog as available.
 
 `GET /event` is an SSE bus carrying all session activity. Consumed types:
 
-| Event | Use |
-|---|---|
-| `message.part.delta` | Token deltas for live streaming |
-| `message.part.updated` | Tool call state, citations |
-| `message.updated` | Token and cost accounting |
-| `session.idle` | **Turn complete** — the primary completion signal |
-| `session.error` | Surface failure, halt the debate |
-| `permission.asked` | Raise a permission card in the UI |
-| `question.asked` | Raise a question card in the UI |
+| Event                  | Use                                               |
+| ---------------------- | ------------------------------------------------- |
+| `message.part.delta`   | Token deltas for live streaming                   |
+| `message.part.updated` | Tool call state, citations                        |
+| `message.updated`      | Token and cost accounting                         |
+| `session.idle`         | **Turn complete** — the primary completion signal |
+| `session.error`        | Surface failure, halt the debate                  |
+| `permission.asked`     | Raise a permission card in the UI                 |
+| `question.asked`       | Raise a question card in the UI                   |
 
 Events are filtered by session id to route them to the correct column.
 
@@ -543,29 +542,29 @@ stay stable.
 
 ### 9.1 Routes
 
-| Method | Route | Purpose |
-|---|---|---|
-| GET | `/` | UI, served from an embedded bundle |
-| GET | `/api/health` | Coin status, version, opencode child status |
-| GET | `/api/models` | Available models, proxied from opencode |
-| GET | `/api/tools` | Detected tool availability |
-| GET | `/api/formats` | The four formats and their default stop conditions |
-| POST | `/api/debate` | Create and start a debate |
-| GET | `/api/debate` | **Full state snapshot** |
-| DELETE | `/api/debate` | Abort and clear the current debate |
-| GET | `/api/debate/turns` | All turns; `?since=N` for the tail |
-| GET | `/api/debate/turns/{index}` | A single turn |
-| PATCH | `/api/debate/turns/{index}` | Edit a turn's text |
-| POST | `/api/debate/control` | A command from section 8.2 |
-| GET | `/api/debate/permissions` | Pending permission requests |
-| POST | `/api/debate/permissions/{id}` | Allow or deny |
-| GET | `/api/debate/questions` | Pending questions |
-| POST | `/api/debate/questions/{id}` | Answer |
-| GET | `/api/stream` | SSE of domain events, snapshot-first |
-| GET | `/api/debates` | Previously saved debates |
-| GET | `/api/debates/{id}` | A saved transcript |
-| GET | `/api/transcript.json` | Current debate, machine-readable |
-| GET | `/api/transcript.md` | Current debate, human-readable |
+| Method | Route                          | Purpose                                            |
+| ------ | ------------------------------ | -------------------------------------------------- |
+| GET    | `/`                            | UI, served from an embedded bundle                 |
+| GET    | `/api/health`                  | Coin status, version, opencode child status        |
+| GET    | `/api/models`                  | Available models, proxied from opencode            |
+| GET    | `/api/tools`                   | Detected tool availability                         |
+| GET    | `/api/formats`                 | The four formats and their default stop conditions |
+| POST   | `/api/debate`                  | Create and start a debate                          |
+| GET    | `/api/debate`                  | **Full state snapshot**                            |
+| DELETE | `/api/debate`                  | Abort and clear the current debate                 |
+| GET    | `/api/debate/turns`            | All turns; `?since=N` for the tail                 |
+| GET    | `/api/debate/turns/{index}`    | A single turn                                      |
+| PATCH  | `/api/debate/turns/{index}`    | Edit a turn's text                                 |
+| POST   | `/api/debate/control`          | A command from section 8.2                         |
+| GET    | `/api/debate/permissions`      | Pending permission requests                        |
+| POST   | `/api/debate/permissions/{id}` | Allow or deny                                      |
+| GET    | `/api/debate/questions`        | Pending questions                                  |
+| POST   | `/api/debate/questions/{id}`   | Answer                                             |
+| GET    | `/api/stream`                  | SSE of domain events, snapshot-first               |
+| GET    | `/api/debates`                 | Previously saved debates                           |
+| GET    | `/api/debates/{id}`            | A saved transcript                                 |
+| GET    | `/api/transcript.json`         | Current debate, machine-readable                   |
+| GET    | `/api/transcript.md`           | Current debate, human-readable                     |
 
 Coin runs one debate at a time, which is why `/api/debate` is singular. Saved
 debates are addressable under the plural collection.
@@ -634,7 +633,7 @@ ready-to-render values. The JavaScript only emits inline SVG from them.
 
 ## 11. Layout and dependencies
 
-The target layout. Entries marked *planned* do not exist yet; see
+The target layout. Entries marked _planned_ do not exist yet; see
 `PROJECT_STATE.md` for what is built.
 
 ```
@@ -720,12 +719,12 @@ timeout), `rust-embed`.
 
 ## 14. Known risks
 
-| Risk | Mitigation |
-|---|---|
-| Models emit unparseable structure | Tolerant parser, degrade to prose, tested against malformed samples |
-| Debaters execute arbitrary commands | Scoped workspace, ask-by-default permissions, explicit auto-approve opt-in |
-| Exa search is experimental and flag-gated | Startup capability detection, UI disables what is absent |
-| opencode API drift across releases | Integration isolated to `opencode/`, pinned version noted, ignored integration test catches breakage |
-| Cost accumulates quickly with tools | Live token and cost totals in the footer, hard round cap; tests pin a cheap model |
+| Risk                                                          | Mitigation                                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Models emit unparseable structure                             | Tolerant parser, degrade to prose, tested against malformed samples                                                                                                                                                                                                                                  |
+| Debaters execute arbitrary commands                           | Scoped workspace, ask-by-default permissions, explicit auto-approve opt-in                                                                                                                                                                                                                           |
+| Exa search is experimental and flag-gated                     | Startup capability detection, UI disables what is absent                                                                                                                                                                                                                                             |
+| opencode API drift across releases                            | Integration isolated to `opencode/`, pinned version noted, ignored integration test catches breakage                                                                                                                                                                                                 |
+| Cost accumulates quickly with tools                           | Live token and cost totals in the footer, hard round cap; tests pin a cheap model                                                                                                                                                                                                                    |
 | Models vary in how well calibrated their stated confidence is | Observed during model selection: a candidate reported 20 percent confidence in a position the evidence plainly supported. A miscalibrated debater corrupts the convergence reading, so model choice is a correctness concern and not only a cost one, and the UI surfaces which model each side used |
-| Debaters collapse into agreement without reasoning | Prompts explicitly reward justified movement and penalize unjustified concession; the credence chart makes a suspicious collapse visible |
+| Debaters collapse into agreement without reasoning            | Prompts explicitly reward justified movement and penalize unjustified concession; the credence chart makes a suspicious collapse visible                                                                                                                                                             |
