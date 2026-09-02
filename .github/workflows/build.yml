@@ -1,0 +1,111 @@
+name: build
+on:
+    push:
+        tags: ["*"]
+    workflow_dispatch:
+
+jobs:
+    # A release is the one build nobody re-runs by hand, so the quality gates
+    # the project already requires before a commit run here too. The build
+    # matrix waits on this: shipping a binary that fails its own test suite is
+    # worse than shipping nothing.
+    check:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Check formatting
+              run: cargo fmt --check
+
+            - name: Lint
+              run: cargo clippy --all-targets -- -D warnings
+
+            # The integration tests are #[ignore]d, so this stays offline and
+            # spends nothing on models.
+            - name: Test
+              run: cargo test
+
+            # `coin --version` reports the crate version, not the tag, so a tag
+            # that disagrees with Cargo.toml ships a binary that misreports
+            # itself and cannot be matched back to its source.
+            - name: Tag matches the crate version
+              if: startsWith(github.ref, 'refs/tags/')
+              run: |
+                  tag="${GITHUB_REF_NAME#v}"
+                  crate=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+                  if [ "${tag}" != "${crate}" ]; then
+                      echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${crate}." >&2
+                      echo "Bump the version in Cargo.toml, or retag." >&2
+                      exit 1
+                  fi
+                  echo "Tag ${GITHUB_REF_NAME} matches crate version ${crate}."
+
+    build_all:
+        needs: check
+        strategy:
+            matrix:
+                platform: ["linux-x86_64", "linux-aarch64", "macos-aarch64"]
+                include:
+                    - platform: linux-x86_64
+                      os: ubuntu-latest
+                      rust_target: x86_64-unknown-linux-musl
+                      asset: coin-linux
+
+                    - platform: linux-aarch64
+                      os: ubuntu-24.04-arm
+                      rust_target: aarch64-unknown-linux-musl
+                      asset: coin-linux-arm64
+
+                    - platform: macos-aarch64
+                      os: macos-latest
+                      rust_target: aarch64-apple-darwin
+                      asset: coin-macos
+
+        runs-on: ${{ matrix.os }}
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install Rust target
+              run: rustup target add ${{ matrix.rust_target }}
+
+            # musl links statically, so one Linux binary runs regardless of the
+            # host's glibc version. That matters for an installer people pipe
+            # into a shell without knowing what distribution they are on.
+            - name: Install Linux musl tools
+              if: endsWith(matrix.rust_target, '-unknown-linux-musl')
+              run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+            - name: Build
+              run: cargo build --release --target ${{ matrix.rust_target }}
+
+            - name: Rename binary for release
+              shell: bash
+              run: cp target/${{ matrix.rust_target }}/release/coin ${{ matrix.asset }}
+
+            - name: Upload binary
+              uses: actions/upload-artifact@v4
+              with:
+                  name: binaries-${{ matrix.platform }}
+                  path: ${{ matrix.asset }}
+
+    release:
+        needs: build_all
+        if: startsWith(github.ref, 'refs/tags/')
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - name: Download release artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: binaries-*
+                  path: artifacts
+                  merge-multiple: true
+
+            - name: Create Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: artifacts/*
+                  generate_release_notes: true

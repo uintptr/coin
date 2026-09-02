@@ -843,6 +843,8 @@ The target layout. Entries marked _planned_ do not exist yet; see
 coin/
   Cargo.toml
   PROJECT_SPECS.md  PROJECT_STATE.md
+  .github/workflows/build.yml   release build; see section 15
+  scripts/install.sh            curl-pipe installer
   samples/config.toml       commented example settings; config.toml is ignored
   src/
     main.rs                 clap CLI: probe, debate
@@ -933,3 +935,57 @@ timeout), `rust-embed`.
 | Models vary in how well calibrated their stated confidence is | Observed during model selection: a candidate reported 20 percent confidence in a position the evidence plainly supported. A miscalibrated debater corrupts the convergence reading, so model choice is a correctness concern and not only a cost one, and the UI surfaces which model each side used |
 | Debaters collapse into agreement without reasoning            | Prompts explicitly reward justified movement and penalize unjustified concession; the credence chart makes a suspicious collapse visible                                                                                                                                                             |
 | A provider quota runs out mid-debate                          | Observed: a daily token limit turned every remaining turn into a silent one, and the debate ran on regardless. A refused turn returns 200 (section 5.4b), so the message error is read, transient failures are retried, and a side that cannot answer ends the debate with a stated reason (section 8.3a) |
+
+## 15. Distribution
+
+Coin is installed by piping a script into a shell, the same way its own
+dependency is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/uintptr/coin/main/scripts/install.sh | bash
+```
+
+`.github/workflows/build.yml` builds on any pushed tag and attaches bare
+binaries to a GitHub release. `scripts/install.sh` detects the platform, reads
+the latest tag from the API, downloads the matching asset into
+`~/.local/bin`, and warns when that directory is not on `PATH`.
+
+| Asset             | Target                      | Runner            |
+| ----------------- | --------------------------- | ----------------- |
+| `coin-linux`      | `x86_64-unknown-linux-musl` | `ubuntu-latest`   |
+| `coin-linux-arm64`| `aarch64-unknown-linux-musl`| `ubuntu-24.04-arm`|
+| `coin-macos`      | `aarch64-apple-darwin`      | `macos-latest`    |
+
+**Linux builds target musl**, so they link statically and run regardless of the
+host's glibc version. That matters more than usual here: an installer piped
+into a shell cannot know what distribution it landed on, and a glibc mismatch
+would surface as an unexplained crash rather than an install failure. Verified
+locally: the musl binary reports `statically linked` and needs no loader.
+reqwest defaults to rustls rather than OpenSSL, so nothing needs vendoring for
+this to link.
+
+**No Windows build.** Nothing in the source is unix-specific and it would
+probably compile, but nothing verifies it runs: the documented workflow reaches
+for `$XDG_DATA_HOME`, opencode credentials under `~/.local/share`, and a bash
+installer that could not install it anyway. Shipping an unverified binary is
+worse than shipping none. Adding it is two lines of matrix if that changes.
+
+**No Intel macOS build**, matching the same decision in the installer, which
+rejects `x86_64` Darwin explicitly rather than downloading something that will
+not run.
+
+**Releasing is gated on the checks.** The build matrix waits on a job running
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test` — the same gates required before a commit. A release is the one
+build nobody re-runs by hand, so it is the worst place to skip them. The
+integration tests are `#[ignore]`d, so this stays offline and spends nothing on
+models.
+
+That job also **fails a tag that disagrees with `Cargo.toml`**. `coin --version`
+reports the crate version, not the tag, so releasing `v0.2.0` from a crate still
+saying `0.1.0` ships a binary that misreports itself and cannot be matched back
+to its source.
+
+Binaries are shipped unstripped. Stripping was measured at 12M to 9.0M, which
+does not buy enough to give up symbol names in panic backtraces while the
+project is still pre-v1.

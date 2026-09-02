@@ -199,6 +199,18 @@ whose contents it could not know and watching it report them.
 
 ## Running it
 
+Install a released build, or build from source:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/uintptr/coin/main/scripts/install.sh | bash
+```
+
+That drops `coin` into `~/.local/bin`. It needs `opencode` on `PATH` and signed
+in to a provider, and says so if it is missing. Releases are cut by pushing a
+tag whose name matches the version in `Cargo.toml`; the workflow refuses a tag
+that disagrees, and runs the full check suite before it builds anything. See
+`PROJECT_SPECS.md` section 15.
+
 ```bash
 cargo run -- debate \
   -q "the question under dispute" \
