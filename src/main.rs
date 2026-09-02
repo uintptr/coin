@@ -10,11 +10,11 @@ use tokio::time::timeout;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
-use coin::config::{OpencodeConfig, data_dir, debate_dir};
+use coin::config::{DebateSettings, OpencodeConfig, RetryPolicy, Settings, data_dir, debate_dir};
 use coin::debate::engine::{DebateConfig, Engine, Progress};
 use coin::debate::format::FormatId;
 use coin::debate::format_for;
-use coin::debate::state::{Credence, DebateState, Side, Topic};
+use coin::debate::state::{Credence, DebateState, Side, StopReason, Topic};
 use coin::error::{CoinError, Result};
 use coin::opencode::client::{HttpClient, OpencodeClient, PromptOptions};
 use coin::opencode::events::{Flow, stream_events};
@@ -29,14 +29,18 @@ use coin::term::{self, Style, paint};
 /// backstop rather than an expected wait.
 const EVENT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Model debaters use unless one is given.
+/// Model debaters use unless `config.toml` or the command line says otherwise.
 ///
 /// Chosen by benchmarking candidates on a real debate. It costs roughly a
 /// fifteenth of the server default (kimi-k3) while still stating
 /// well-calibrated confidences, which is what the credence format depends on:
 /// cheaper models were faster still but reported low confidence in positions
 /// the evidence plainly supported, which corrupts the convergence reading.
-const DEFAULT_DEBATE_MODEL: &str = "digitalocean/glm-5.3-flash";
+///
+/// Routed through OpenRouter rather than DigitalOcean. Same weights, so the
+/// benchmark still holds, at half the price and without the daily token quota
+/// that silently emptied a real debate's later rounds.
+const DEFAULT_DEBATE_MODEL: &str = "openrouter/z-ai/glm-5.3-flash";
 
 /// Structured debate between two LLM debaters, streamed to a web UI.
 #[derive(Debug, Parser)]
@@ -44,6 +48,11 @@ const DEFAULT_DEBATE_MODEL: &str = "digitalocean/glm-5.3-flash";
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Read defaults from this file instead of `config.toml` in the working
+    /// directory. A file named here must exist.
+    #[arg(long, value_name = "FILE", global = true)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -201,8 +210,46 @@ async fn text_or_file(label: &str, value: String) -> Result<String> {
     Ok(value)
 }
 
+/// Settle which model each side argues with.
+///
+/// Three sources, in falling order of precedence: the command line, the
+/// configuration file, and the built-in default. `-m` is documented as setting
+/// **both** sides, so it also overrides a `model_b` pinned in a file;
+/// `--model-b` is how to ask for two different models on one run.
+///
+/// # Arguments
+///
+/// * `flag_a` - `-m`, the model for both sides
+/// * `flag_b` - `--model-b`, side B only
+/// * `settings` - Debate defaults from the configuration file
+///
+/// # Returns
+///
+/// The models for side A and side B, in that order.
+///
+/// # Errors
+///
+/// Returns [`CoinError::Invalid`] if the built-in default is not in
+/// `provider/model` form, which would be a bug in this file.
+fn resolve_models(
+    flag_a: Option<ModelRef>,
+    flag_b: Option<ModelRef>,
+    settings: DebateSettings,
+) -> Result<(ModelRef, ModelRef)> {
+    let built_in = DEFAULT_DEBATE_MODEL.parse().map_err(CoinError::Invalid)?;
+    let model_a = flag_a.clone().or(settings.model).unwrap_or(built_in);
+    let model_b = flag_b
+        .or(flag_a)
+        .or(settings.model_b)
+        .unwrap_or_else(|| model_a.clone());
+
+    Ok((model_a, model_b))
+}
+
 /// Dispatch the parsed command.
 async fn run(cli: Cli) -> Result<()> {
+    let settings = Settings::load(cli.config.as_deref())?;
+
     match cli.command {
         Command::Probe {
             message,
@@ -220,8 +267,7 @@ async fn run(cli: Cli) -> Result<()> {
             save,
             no_websearch,
         } => {
-            let default = DEFAULT_DEBATE_MODEL.parse().map_err(CoinError::Invalid)?;
-            let model_a = model.clone().unwrap_or(default);
+            let (model_a, model_b) = resolve_models(model, model_b, settings.debate)?;
             let config = DebateConfig {
                 topic: Topic::new(
                     text_or_file("question", question).await?,
@@ -229,8 +275,9 @@ async fn run(cli: Cli) -> Result<()> {
                     text_or_file("position B", position_b).await?,
                 ),
                 max_rounds,
-                model_b: Some(model_b.or(model).unwrap_or_else(|| model_a.clone())),
                 model_a: Some(model_a),
+                model_b: Some(model_b),
+                retry: RetryPolicy::default(),
             };
             debate(config, format, !no_websearch, save).await
         }
@@ -391,7 +438,10 @@ async fn debate(
                 let _ = std::io::stdout().flush();
             }
             Progress::TurnCompleted(turn) => print_turn_analysis(&turn),
-            Progress::Finished { .. } => {}
+            // A turn that failed never reached its completion, so the colour
+            // opened when it started is still open. Closing it here keeps a
+            // failed debate from tinting everything printed after it.
+            Progress::Finished { .. } => print!("{}", term::reset()),
         })
         .await?;
 
@@ -423,7 +473,19 @@ async fn debate(
         );
     }
 
-    server.shutdown().await
+    server.shutdown().await?;
+
+    // A debate that ended because a side could not answer is a failure rather
+    // than a result, so anything scripting coin sees a non-zero exit. The
+    // transcript above is saved first: the turns that did happen still cost
+    // money and are still worth reading.
+    match state.stop_reason {
+        Some(StopReason::Failed { side, message }) => Err(CoinError::Session {
+            session_id: engine.session_id(side).to_string(),
+            message,
+        }),
+        Some(_) | None => Ok(()),
+    }
 }
 
 /// Print the structured findings that follow a turn's prose.
@@ -625,6 +687,108 @@ async fn probe(message: String, model: Option<ModelRef>, websearch: bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parse a `provider/model` string in a test.
+    fn model(value: &str) -> ModelRef {
+        value.parse().expect("test model must parse")
+    }
+
+    /// Settings pinning the given models.
+    fn settings(side_a: Option<&str>, side_b: Option<&str>) -> DebateSettings {
+        DebateSettings {
+            model: side_a.map(model),
+            model_b: side_b.map(model),
+        }
+    }
+
+    #[test]
+    fn with_no_flags_and_no_file_both_sides_get_the_built_in_default() {
+        // Arrange and act
+        let (a, b) = resolve_models(None, None, settings(None, None)).expect("must resolve");
+
+        // Assert: the same model on both sides isolates the argument from model
+        // capability, which is why it is the default.
+        assert_eq!(a.to_string(), DEFAULT_DEBATE_MODEL);
+        assert_eq!(b, a);
+    }
+
+    #[test]
+    fn the_file_supplies_both_sides_when_the_command_line_is_silent() {
+        // Arrange
+        let file = settings(Some("openrouter/z-ai/glm-5.3-flash"), Some("a/b"));
+
+        // Act
+        let (a, b) = resolve_models(None, None, file).expect("must resolve");
+
+        // Assert
+        assert_eq!(a.to_string(), "openrouter/z-ai/glm-5.3-flash");
+        assert_eq!(b.to_string(), "a/b");
+    }
+
+    #[test]
+    fn a_file_pinning_only_one_model_still_gives_both_sides_a_model() {
+        // Arrange
+        let file = settings(Some("provider/only"), None);
+
+        // Act
+        let (a, b) = resolve_models(None, None, file).expect("must resolve");
+
+        // Assert
+        assert_eq!(a.to_string(), "provider/only");
+        assert_eq!(b, a);
+    }
+
+    #[test]
+    fn the_command_line_beats_the_file_on_both_sides() {
+        // Arrange: -m is documented as setting both sides, so it must override
+        // a model_b the file pinned rather than producing a surprise pairing.
+        let file = settings(Some("file/a"), Some("file/b"));
+
+        // Act
+        let (a, b) = resolve_models(Some(model("flag/x")), None, file).expect("must resolve");
+
+        // Assert
+        assert_eq!(a.to_string(), "flag/x");
+        assert_eq!(b.to_string(), "flag/x");
+    }
+
+    #[test]
+    fn model_b_on_the_command_line_differs_the_sides() {
+        // Arrange
+        let file = settings(Some("file/a"), Some("file/b"));
+
+        // Act
+        let (a, b) = resolve_models(None, Some(model("flag/y")), file).expect("must resolve");
+
+        // Assert: A still comes from the file, B from the flag.
+        assert_eq!(a.to_string(), "file/a");
+        assert_eq!(b.to_string(), "flag/y");
+    }
+
+    #[test]
+    fn both_flags_together_win_outright() {
+        // Arrange
+        let file = settings(Some("file/a"), Some("file/b"));
+
+        // Act
+        let (a, b) = resolve_models(Some(model("flag/x")), Some(model("flag/y")), file)
+            .expect("must resolve");
+
+        // Assert
+        assert_eq!(a.to_string(), "flag/x");
+        assert_eq!(b.to_string(), "flag/y");
+    }
+
+    #[test]
+    fn the_built_in_default_is_routable() {
+        // Arrange and act: a typo here would only surface at the first debate.
+        let parsed = model(DEFAULT_DEBATE_MODEL);
+
+        // Assert: the model id keeps its own slash, so only the first one
+        // separates the provider.
+        assert_eq!(parsed.provider_id, "openrouter");
+        assert_eq!(parsed.model_id, "z-ai/glm-5.3-flash");
+    }
 
     /// Write a scratch file and return its path.
     async fn scratch_file(label: &str, contents: &str) -> PathBuf {

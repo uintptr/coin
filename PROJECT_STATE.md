@@ -5,7 +5,7 @@ picking the work up, and the last thing to update before finishing a session.
 `PROJECT_SPECS.md` holds the design and changes rarely; this file tracks where
 the work actually is and is expected to change constantly.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-02
 **Build order position:** steps 1-5 complete; step 6 is next
 
 Deliberately no commit hash here — git already knows it, and a hash copied into
@@ -63,14 +63,26 @@ built-in coding prompt rather than adding to it. Each debate gets a disposable
 git-initialized workspace.
 
 Arguments stream token by token in a colour per side, with the model named in
-the header. The default debater model is `digitalocean/glm-5.3-flash`, picked by
-benchmarking on real debates: about a fifteenth the cost of the previous default
-while still well calibrated.
+the header. The default debater model is `openrouter/z-ai/glm-5.3-flash`, picked
+by benchmarking on real debates: about a fifteenth the cost of the previous
+default while still well calibrated. Those are the same weights that were
+benchmarked as `digitalocean/glm-5.3-flash`; only the route changed, for half
+the price and no daily token quota.
 
 Every debate auto-saves `transcript.json` and `transcript.md` into its
 workspace; `--save FILE` writes an extra copy anywhere.
 
-**Tests:** 112 library tests, 8 binary tests, and 6 doctests run offline and
+Model defaults come from `config.toml` in the working directory or from
+`--config FILE`, with the command line winning over both. See
+`PROJECT_SPECS.md` section 2.1b; `samples/config.toml` is the example.
+
+A turn that comes back with no visible text is retried, three attempts with a
+doubling backoff, and every attempt is logged with the reason. Failures the
+provider marks as permanent are not retried. A side that stays silent ends the
+debate with `StopReason::Failed`, which saves the transcript, names the side and
+the cause, and exits non-zero. See `PROJECT_SPECS.md` sections 5.4b and 8.3a.
+
+**Tests:** 119 library tests, 8 binary tests, and 6 doctests run offline and
 free. 4 integration tests marked `#[ignore]` drive a real server, take about
 5 seconds, and cost well under a cent.
 
@@ -134,6 +146,12 @@ rediscovered:
    everything after the last user message.
 8. **Agent files replace the built-in system prompt** and are read at server
    startup, so they must be written before launch.
+9. **A refused turn still returns 200.** When the provider rejects the request,
+   the prompt route succeeds and the failure is recorded on the assistant
+   message as an `error` object with `message`, `statusCode`, and `isRetryable`,
+   alongside no text parts. Read only the HTTP status and a refused request is
+   indistinguishable from a model with nothing to say. opencode has already
+   retried the provider about six times before recording it.
 
 **A correction worth keeping.** An earlier note here claimed cheap models
 fabricate tool use, and that tool invocation over REST was unreliable. Both were
@@ -147,9 +165,11 @@ whose contents it could not know and watching it report them.
 - **Personas versus a long-lived server.** Agent files are read at opencode
   startup. The CLI writes both personas then launches, but a web server outlives
   many debates. Blocks step 6; see "Next session".
-- **Debate cost.** Now roughly $0.008 for a two-turn debate on the default
-  model, down from about $0.24 per four turns on kimi-k3. Still worth surfacing
-  running cost in the UI.
+- **Debate cost.** Measured at roughly $0.008 for a two-turn debate when the
+  default ran on DigitalOcean, down from about $0.24 per four turns on kimi-k3.
+  OpenRouter charges half as much for the same weights, so expect about half
+  that, though it has not been measured since the route changed. Still worth
+  surfacing running cost in the UI.
 - **Speed varies enormously by model.** The default exceeded 400 seconds on a
   single round with web search, while gpt-oss-120b finished two rounds in under
   a minute. Slow turns will matter more once a browser is waiting on them.
@@ -163,8 +183,13 @@ whose contents it could not know and watching it report them.
 - **Structured blocks fail more often than expected in long debates.** A real
   six-round run produced only two readable credences per side, meaning eight of
   twelve turns had no usable structure. The convergence check runs on the most
-  recent readable value, so it can compare stale numbers across a long gap. The
-  count is now reported, but the underlying parse rate is worth investigating.
+  recent readable value, so it can compare stale numbers across a long gap.
+  **Partly explained since:** the run that prompted this hit DigitalOcean's
+  daily token limit at round 3, and every turn after it was empty rather than
+  unparseable. Empty turns now stop the debate with a reason, so a future
+  sparse table means genuine parse failure. Whether the parse rate is really
+  poor on turns that do produce text is still open, and needs a clean run
+  inside quota to answer.
 - **A listed model is not necessarily usable.** DigitalOcean rejects parts of
   its catalog with subscription-tier and not-found errors, surfacing as an
   opaque `UnknownError` with the real cause only in the server log.
@@ -179,6 +204,7 @@ cargo run -- debate \
   -r 2                        # max rounds; -m to pick a model,
                               # --model-b to differ the two sides
                               # --save FILE for an extra transcript copy
+                              # --config FILE for settings elsewhere
 
 cargo run -- probe "your question"                           # one prompt, streamed
 cargo run -- probe -m digitalocean/openai-gpt-oss-20b "..."  # pick a model
@@ -189,8 +215,20 @@ RUST_LOG=coin=debug cargo run -- probe "..."                 # verbose
 which is easier for positions that run to paragraphs. A value that looks like a
 path but does not exist is rejected rather than debated literally.
 
+The default debater model is `openrouter/z-ai/glm-5.3-flash`. To change it
+without touching the source, copy `samples/config.toml` to `config.toml` in the
+directory you run from, or pass `--config FILE`. The command line beats the
+file, the file beats the built-in default, and an unknown key or an unroutable
+model fails at startup with the line that caused it. A local `config.toml` is
+git-ignored.
+
 Only the `credence` format is implemented; the other three are step 7 and are
 rejected with a clear message.
+
+A debate that stops because a side could not answer still writes its transcript,
+prints the provider's own reason on the `ended:` line, and exits non-zero. The
+usual cause is a provider quota: watch stderr for `turn produced nothing,
+retrying`.
 
 Arguments stream live in colour, cyan for side A and magenta for side B.
 Styling switches off automatically when output is redirected; `NO_COLOR`

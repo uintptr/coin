@@ -133,6 +133,33 @@ impl CoinError {
         }
     }
 
+    /// Whether retrying the failed operation could plausibly succeed.
+    ///
+    /// Transport failures and the server's own overload responses are worth
+    /// another attempt. Everything else fails identically however many times
+    /// it is asked: a rejected payload stays rejected, a missing directory
+    /// stays missing, and retrying only delays the report.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the operation is worth another attempt.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(source) => source.is_timeout() || source.is_connect() || source.is_request(),
+            Self::OpencodeStatus { status, .. } => matches!(status, 408 | 429 | 500..=599),
+            Self::OpencodeLaunch(_)
+            | Self::OpencodeExited { .. }
+            | Self::PortDiscoveryTimeout { .. }
+            | Self::HealthTimeout { .. }
+            | Self::Decode { .. }
+            | Self::EventStream(_)
+            | Self::Session { .. }
+            | Self::Io { .. }
+            | Self::Invalid(_)
+            | Self::MissingDirectory(_) => false,
+        }
+    }
+
     /// Build a [`CoinError::Decode`] from a context label and a serde error.
     ///
     /// # Arguments

@@ -64,7 +64,7 @@ Assigning the same model to both sides is the default because it isolates the
 argument from model capability. Differing models are supported and are the more
 interesting configuration once the basics work.
 
-**The default debater model is `digitalocean/glm-5.3-flash`**, chosen by
+**The default debater model is `openrouter/z-ai/glm-5.3-flash`**, chosen by
 benchmarking candidates on real debates rather than on price alone. It costs
 roughly a fifteenth of the server default while still stating well-calibrated
 confidences. That last property is not optional: the cheaper models tried were
@@ -76,6 +76,50 @@ available.
 Model choice is therefore a correctness decision, not only a cost one, and the
 model in use is displayed in the debate header so a suspicious result can be
 attributed.
+
+**The route changed, not the model.** The same weights were originally used as
+`digitalocean/glm-5.3-flash`, which the benchmark above was run against.
+DigitalOcean charges $0.150/$0.250 per million input/output tokens against
+OpenRouter's $0.075/$0.250, and it enforces a daily token quota that ended a
+real debate mid-run: every turn after the limit came back empty. Moving the
+route keeps the calibration result, halves the price, and removes that wall. It
+is not a new model choice and does not need re-benchmarking.
+
+### 2.1b Defaults come from a configuration file
+
+Choosing a model should not be a recompile, and typing `-m
+openrouter/z-ai/glm-5.3-flash` on every invocation is worse. Coin therefore
+reads a `config.toml`:
+
+```toml
+[debate]
+model = "openrouter/z-ai/glm-5.3-flash"
+model_b = "openrouter/openai/gpt-oss-120b"   # optional
+```
+
+Three sources settle each value, in falling order of precedence: **the command
+line, then the file, then the built-in default.** `-m` is documented as setting
+both sides, so it overrides a `model_b` the file pinned; `--model-b` is how to
+differ the sides for a single run.
+
+The file is read from the working directory, or from the path given to
+`--config`. The two are treated differently on purpose: an absent `config.toml`
+is the ordinary case and means "use the defaults", while a file named
+explicitly must exist, because silently ignoring `--config typo.toml` would run
+a debate with settings the operator believes they replaced.
+
+Unknown keys are **rejected** rather than ignored, for the same reason: a
+misspelled `moddel` that quietly does nothing is worse than a startup error
+naming the line. Models are validated at load, so `provider/model` form is
+enforced against the file and column, not discovered at the first prompt.
+
+Only debate defaults live there today. `probe` keeps taking the server's own
+choice unless `-m` says otherwise, since its purpose is exercising the
+integration path rather than producing a result.
+
+`samples/config.toml` is the commented example, and a test loads it so a
+sample that stops parsing fails the build. A `config.toml` in the working
+directory is git-ignored, being local preference rather than project design.
 
 ### 2.1a Topic arguments accept a file or a string
 
@@ -405,6 +449,42 @@ for live streaming.
 `reasoning` is its own part type and is excluded from transcript text. It is
 the model's internal monologue, not its argument.
 
+### 5.4b A refused turn still returns 200
+
+When a provider rejects the request, `POST /session/{id}/message` **succeeds**.
+opencode records the failure on the assistant message instead: no text parts,
+zero cost, zero tokens, and an `error` object on the message info.
+
+```json
+"error": {
+  "name": "APIError",
+  "data": {
+    "message": "Rate limit exceeded: tokens_per_day.",
+    "statusCode": 429,
+    "isRetryable": true
+  }
+}
+```
+
+A client that only checks the HTTP status therefore sees a silent model rather
+than a refused request, which is exactly wrong: it looks like a debater with
+nothing to say. `MessageInfo::error` is read for this reason, and its
+`isRetryable` flag is preferred over any judgement inferred from the status,
+since the provider knows things the status code does not. `name` is the error
+class, and a deliberate cancellation arrives as `MessageAbortedError` with an
+empty `data`, so every field is optional.
+
+opencode retries the provider itself, roughly six times with a widening
+backoff, before recording the failure. Anything coin retries is therefore a
+**second** layer on top of an upstream one that has already given up, which is
+why coin's own retry count is small and why the provider's message is reported
+rather than buried.
+
+The rejection carries the provider's rate-limit headers in
+`data.responseHeaders`, including remaining and reset values. Those header names
+are provider-specific, so they are deliberately not parsed; the message text and
+status are provider-neutral and say enough to act on.
+
 ### 5.5 Sessions and personas
 
 Three sessions per debate: side A, side B, judge. Each keeps its own history, so
@@ -521,6 +601,39 @@ Delivered over an `mpsc` channel from the HTTP handlers:
 The debate runs continuously by default and intervention acts on the last
 completed turn. **Step mode** switches to pausing after every turn for close
 supervision.
+
+### 8.3a A silent turn is retried, then it stops the debate
+
+A turn that comes back with no visible text is not a turn. Section 5.4b is why
+this happens without an HTTP error, and the engine responds in three steps.
+
+**Retry the transient.** Up to `RetryPolicy::attempts` attempts per turn, three
+by default, with a backoff that starts at five seconds and doubles. A turn
+already takes minutes, so the wait costs nothing next to the chance that an
+overloaded provider clears. Each retry re-sends the same prompt, which appends
+a fresh user message; since a turn is read back as everything after the **last**
+user message, a retry cannot pick up debris from the attempt before it. Every
+attempt is logged with the side, the attempt number, the delay, and the
+provider's own words.
+
+**Do not retry the permanent.** An exhausted account, a rejected key, or a model
+the subscription does not cover will refuse identically however often it is
+asked. Retrying those spends minutes to arrive at the same sentence, so they
+fail on the first attempt and report the cause. The provider's `isRetryable`
+flag decides, falling back to the status code.
+
+**Stop the debate rather than continue without a side.** When a side is still
+silent after every attempt, the debate ends with `StopReason::Failed { side,
+message }`. The alternative, observed in a real run, is worse: the engine
+carried on for four more rounds recording empty turns on both sides, spending
+wall-clock time to produce a transcript whose convergence table was drawn from
+two stale readings. Ending there preserves the turns already paid for, saves the
+transcript as usual, names the side and the reason in it, and exits non-zero so
+anything scripting coin can tell a failed debate from a finished one.
+
+A turn with prose but no structured block is **not** retried. That is a model
+ignoring the format, not a provider failing, and re-rolling it pays twice to
+discard a real argument. It degrades to prose-only exactly as section 6 says.
 
 ### 8.4 Domain events
 
@@ -640,9 +753,10 @@ The target layout. Entries marked _planned_ do not exist yet; see
 coin/
   Cargo.toml
   PROJECT_SPECS.md  PROJECT_STATE.md
+  samples/config.toml       commented example settings; config.toml is ignored
   src/
     main.rs                 clap CLI: probe, debate
-    config.rs               timeouts, data directory resolution
+    config.rs               settings file, timeouts, data directory resolution
     error.rs                CoinError via thiserror
     term.rs                 terminal colour for the CLI
     store.rs                transcript persistence and export
@@ -668,9 +782,9 @@ coin/
 ```
 
 In use today: `tokio`, `reqwest` (json, stream), `eventsource-stream`,
-`futures-util`, `async-trait`, `serde`, `serde_json`, `thiserror`, `anyhow`,
-`tracing`, `tracing-subscriber`, `clap`, `chrono`, `dirs`, `dotenvy`, `rand`,
-`uuid`.
+`futures-util`, `async-trait`, `serde`, `serde_json`, `toml`, `thiserror`,
+`anyhow`, `tracing`, `tracing-subscriber`, `clap`, `chrono`, `dirs`, `dotenvy`,
+`rand`, `uuid`.
 
 Added with the web layer in step 6: `axum`, `tower-http` (trace, compression,
 timeout), `rust-embed`.
@@ -728,3 +842,4 @@ timeout), `rust-embed`.
 | Cost accumulates quickly with tools                           | Live token and cost totals in the footer, hard round cap; tests pin a cheap model                                                                                                                                                                                                                    |
 | Models vary in how well calibrated their stated confidence is | Observed during model selection: a candidate reported 20 percent confidence in a position the evidence plainly supported. A miscalibrated debater corrupts the convergence reading, so model choice is a correctness concern and not only a cost one, and the UI surfaces which model each side used |
 | Debaters collapse into agreement without reasoning            | Prompts explicitly reward justified movement and penalize unjustified concession; the credence chart makes a suspicious collapse visible                                                                                                                                                             |
+| A provider quota runs out mid-debate                          | Observed: a daily token limit turned every remaining turn into a silent one, and the debate ran on regardless. A refused turn returns 200 (section 5.4b), so the message error is read, transient failures are retried, and a side that cannot answer ends the debate with a stated reason (section 8.3a) |

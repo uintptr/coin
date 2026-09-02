@@ -73,6 +73,78 @@ pub struct MessageInfo {
     /// Token accounting for the message.
     #[serde(default)]
     pub tokens: Tokens,
+    /// Failure recorded against the message, when the turn did not complete.
+    #[serde(default)]
+    pub error: Option<MessageError>,
+}
+
+/// A failure opencode recorded against an assistant message.
+///
+/// A failed turn does **not** fail the HTTP request: `POST
+/// /session/{id}/message` still returns 200, and the rejection is recorded on
+/// the message as a message with no text parts and this field set. Without
+/// reading it, a provider refusing the request is indistinguishable from a
+/// model that chose to say nothing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageError {
+    /// Error class, for example `APIError` or `MessageAbortedError`.
+    #[serde(default)]
+    pub name: String,
+    /// Detail, whose shape varies by class.
+    #[serde(default)]
+    pub data: MessageErrorData,
+}
+
+/// Detail carried by a [`MessageError`].
+///
+/// Every field is optional: an aborted turn carries an empty `data`, while a
+/// provider rejection carries all three.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MessageErrorData {
+    /// What the provider said, for example `Rate limit exceeded: tokens_per_day.`
+    #[serde(default)]
+    pub message: String,
+    /// HTTP status the provider returned, when the failure came from one.
+    #[serde(default, rename = "statusCode")]
+    pub status_code: Option<u16>,
+    /// Whether the provider marked the failure as worth retrying.
+    #[serde(default, rename = "isRetryable")]
+    pub is_retryable: Option<bool>,
+}
+
+impl MessageError {
+    /// Whether another attempt at the same turn could plausibly succeed.
+    ///
+    /// The provider's own judgement is preferred when it offers one, since it
+    /// knows things the status code does not. Otherwise the status is used:
+    /// timeouts, throttling, and server faults are transient, while an
+    /// authentication, credit, or unavailable-model failure will refuse
+    /// identically however many times it is asked.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the turn is worth retrying.
+    pub fn is_retryable(&self) -> bool {
+        self.data
+            .is_retryable
+            .unwrap_or(matches!(self.data.status_code, Some(408 | 429 | 500..=599)))
+    }
+}
+
+impl std::fmt::Display for MessageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = if self.name.is_empty() {
+            "error"
+        } else {
+            &self.name
+        };
+        match (self.data.status_code, self.data.message.as_str()) {
+            (Some(status), "") => write!(formatter, "{name} {status}"),
+            (Some(status), message) => write!(formatter, "{name} {status}: {message}"),
+            (None, "") => write!(formatter, "{name}"),
+            (None, message) => write!(formatter, "{name}: {message}"),
+        }
+    }
 }
 
 /// One part of a message: text, a tool invocation, or a step marker.
@@ -536,6 +608,73 @@ mod tests {
         // Assert
         assert_eq!(message.text(), "hello world");
         assert_eq!(message.info.cost, 0.02);
+    }
+
+    #[test]
+    fn a_rejected_turn_is_a_message_with_an_error_and_no_text() {
+        // Arrange: captured verbatim from opencode 1.18.26's message store,
+        // where a debate turn was refused. Note the 200-shaped message: the
+        // failure is in the body, not the HTTP status.
+        let raw = serde_json::json!({
+            "info": {
+                "role": "assistant",
+                "modelID": "glm-5.3-flash",
+                "providerID": "digitalocean",
+                "cost": 0,
+                "tokens": { "input": 0, "output": 0, "reasoning": 0 },
+                "error": {
+                    "name": "APIError",
+                    "data": {
+                        "message": "Rate limit exceeded: tokens_per_day.",
+                        "statusCode": 429,
+                        "isRetryable": true
+                    }
+                }
+            },
+            "parts": []
+        });
+
+        // Act
+        let message: AssistantMessage =
+            serde_json::from_value(raw).expect("a failed message must deserialize");
+
+        // Assert
+        assert!(message.text().is_empty());
+        let error = message.info.error.expect("the error must be read");
+        assert!(error.is_retryable());
+        assert_eq!(
+            error.to_string(),
+            "APIError 429: Rate limit exceeded: tokens_per_day."
+        );
+    }
+
+    #[test]
+    fn an_error_without_a_retryable_flag_falls_back_to_the_status() {
+        // Arrange: two failures that carry a status but no verdict, plus an
+        // aborted turn, which carries neither.
+        let of = |data: serde_json::Value| -> MessageError {
+            serde_json::from_value(serde_json::json!({ "name": "APIError", "data": data }))
+                .expect("error fixture must deserialize")
+        };
+
+        // Act and assert: throttling is worth another attempt, an exhausted
+        // account is not, and an abort was deliberate.
+        assert!(of(serde_json::json!({ "statusCode": 503 })).is_retryable());
+        assert!(!of(serde_json::json!({ "statusCode": 402 })).is_retryable());
+        assert!(!of(serde_json::json!({})).is_retryable());
+    }
+
+    #[test]
+    fn a_message_without_an_error_reports_none() {
+        // Arrange: the ordinary case, which must not require the field.
+        let raw = serde_json::json!({ "info": { "role": "assistant" }, "parts": [] });
+
+        // Act
+        let message: AssistantMessage =
+            serde_json::from_value(raw).expect("message fixture must deserialize");
+
+        // Assert
+        assert!(message.info.error.is_none());
     }
 
     #[test]

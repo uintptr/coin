@@ -1,0 +1,38 @@
+# Sample coin configuration.
+#
+# Copy it to `config.toml` in the directory you run coin from, or point at it
+# explicitly:
+#
+#     cp samples/config.toml config.toml
+#     coin --config samples/config.toml debate -q ... -a ... -b ...
+#
+# A `config.toml` in the working directory is picked up automatically; a file
+# named with `--config` must exist, so a typo is reported rather than ignored.
+# Every key below is optional, and anything given on the command line wins over
+# what is written here. Unknown keys are an error, not a silent no-op.
+
+[debate]
+
+# Model both sides argue with, as `provider/model`. Only the first slash
+# separates the provider, so the model id may contain slashes of its own.
+#
+# This is also the built-in default. It was chosen by benchmarking candidates
+# on real debates rather than on price: it states well-calibrated confidences,
+# which is what the credence format's convergence reading depends on. Cheaper
+# candidates were faster still but reported low confidence in positions the
+# evidence plainly supported, which corrupts that reading.
+#
+# Routed through OpenRouter at half the price of the same weights on
+# DigitalOcean, and without the daily token quota that emptied a real debate's
+# later rounds.
+model = "openrouter/z-ai/glm-5.3-flash"
+
+# Model for side B, when the two sides should differ.
+#
+# Left unset on purpose: giving both sides the same model isolates the argument
+# from model capability, which is why it is the default. Two different models is
+# the more interesting configuration once the basics work. Note that `-m` on the
+# command line means "both sides" and so overrides this; use `--model-b` to
+# differ the sides for a single run.
+#
+# model_b = "openrouter/openai/gpt-oss-120b"

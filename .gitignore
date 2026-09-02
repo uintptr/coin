@@ -1,3 +1,7 @@
 /target
 .env
 /debates
+
+# Local settings, picked up automatically from the working directory. The
+# committed example lives at samples/config.toml.
+/config.toml

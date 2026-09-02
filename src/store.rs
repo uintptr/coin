@@ -241,6 +241,9 @@ pub fn describe_stop(reason: &Option<StopReason>) -> String {
         Some(StopReason::NoNewClaims) => "a round introduced no new claims".to_string(),
         Some(StopReason::FormatComplete) => "the format's rounds finished".to_string(),
         Some(StopReason::Aborted) => "stopped by the operator".to_string(),
+        Some(StopReason::Failed { side, message }) => {
+            format!("Debater {side} could not answer: {message}")
+        }
         None => "did not finish".to_string(),
     }
 }
@@ -567,6 +570,10 @@ mod tests {
             StopReason::NoNewClaims,
             StopReason::FormatComplete,
             StopReason::Aborted,
+            StopReason::Failed {
+                side: Side::A,
+                message: "APIError 429: Rate limit exceeded".to_string(),
+            },
         ] {
             let text = describe_stop(&Some(reason.clone()));
             assert!(!text.is_empty(), "{reason:?} produced nothing");

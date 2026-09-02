@@ -11,13 +11,15 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, info, warn};
+use tokio::time::sleep;
+use tracing::{debug, error, info, warn};
 
+use crate::config::RetryPolicy;
 use crate::debate::format::DebateFormat;
 use crate::debate::state::{DebateState, Side, StopReason, Topic, Turn};
-use crate::error::Result;
+use crate::error::{CoinError, Result};
 use crate::opencode::client::{OpencodeClient, PromptOptions};
-use crate::opencode::types::{AssistantMessage, ModelRef, Tokens, ToolCall};
+use crate::opencode::types::{AssistantMessage, MessageError, ModelRef, Tokens, ToolCall};
 
 /// Everything needed to run one debate.
 #[derive(Debug, Clone)]
@@ -30,6 +32,8 @@ pub struct DebateConfig {
     pub model_a: Option<ModelRef>,
     /// Model for side B.
     pub model_b: Option<ModelRef>,
+    /// How a turn that comes back empty is retried.
+    pub retry: RetryPolicy,
 }
 
 impl DebateConfig {
@@ -54,6 +58,42 @@ struct RawTurn {
     tool_calls: Vec<ToolCall>,
     tokens: Tokens,
     cost: f64,
+    /// Failure recorded against one of the turn's messages, if any.
+    error: Option<MessageError>,
+}
+
+/// Why an attempt at a turn produced nothing usable.
+#[derive(Debug)]
+enum TurnFault {
+    /// Worth another attempt: a transient provider or transport failure, or a
+    /// turn that came back silently for no stated reason.
+    Transient(String),
+    /// Not worth another attempt. Authentication, credit, and unavailable-model
+    /// failures refuse identically however often they are asked, so retrying
+    /// only delays the report by several minutes.
+    Permanent(String),
+}
+
+/// Classify a completed attempt.
+///
+/// # Returns
+///
+/// `None` when the turn carries visible text, which is the only outcome the
+/// debate can use. Otherwise the fault that explains the silence.
+fn fault_of(raw: &RawTurn) -> Option<TurnFault> {
+    if !raw.text.trim().is_empty() {
+        return None;
+    }
+
+    Some(match &raw.error {
+        Some(error) if error.is_retryable() => TurnFault::Transient(error.to_string()),
+        Some(error) => TurnFault::Permanent(error.to_string()),
+        // The provider accepted the turn and the model said nothing. There is
+        // no stated cause to judge from, so it is treated as transient:
+        // another attempt is the only way to separate a fluke from a model
+        // that will not answer.
+        None => TurnFault::Transient("the model produced no visible text".to_string()),
+    })
 }
 
 /// Reconstruct the most recent turn from a session's full message list.
@@ -79,6 +119,9 @@ fn collect_turn(messages: &[AssistantMessage]) -> RawTurn {
             turn.tokens.output += message.info.tokens.output;
             turn.tokens.reasoning += message.info.tokens.reasoning;
             turn.cost += message.info.cost;
+            // The first failure is the one that explains the turn; anything
+            // after it is a consequence.
+            turn.error = turn.error.or_else(|| message.info.error.clone());
             turn
         })
 }
@@ -181,26 +224,108 @@ where
         format!("debater-{}", side.label())
     }
 
-    /// Run one side's turn and record it.
-    async fn take_turn(&self, state: &mut DebateState, side: Side) -> Result<usize> {
+    /// Prompt one side once and reconstruct what it produced.
+    async fn attempt_turn(
+        &self,
+        side: Side,
+        prompt: &str,
+        options: &PromptOptions,
+    ) -> Result<RawTurn> {
         let session = self.session(side);
-        let prompt = self.format.turn_prompt(state, side);
-
-        let options = PromptOptions {
-            agent: Some(Self::agent_name(side)),
-            model: self.config.model(side),
-        };
-
-        self.client.prompt(session, &prompt, &options).await?;
+        self.client.prompt(session, prompt, options).await?;
 
         // Re-read the session rather than trusting the prompt response, which
         // carries only the final message of a multi-message turn.
         let messages = self.client.messages(session).await?;
-        let raw = collect_turn(&messages);
+        Ok(collect_turn(&messages))
+    }
 
-        if raw.text.trim().is_empty() {
-            warn!(%side, "turn produced no visible text");
+    /// Prompt one side, retrying a turn that comes back empty.
+    ///
+    /// A silent turn is usually not a silent model. opencode answers the
+    /// prompt route with 200 even when the provider refused the request, so an
+    /// overloaded or throttled provider arrives here as a turn with no text
+    /// and an error recorded on the message. Retrying recovers the transient
+    /// cases; the rest are reported with the provider's own words, which is
+    /// the difference between a debate that stops with a reason and one that
+    /// runs its remaining rounds producing nothing.
+    ///
+    /// Each retry re-sends the same prompt, which appends a fresh user message
+    /// to the session. That is deliberate: [`collect_turn`] reads back only
+    /// what follows the last user message, so a retry cannot pick up debris
+    /// from the attempt before it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoinError::Session`] when the side is still silent after
+    /// every attempt, or immediately for a failure that retrying cannot fix.
+    async fn turn_with_retries(&self, side: Side, prompt: &str) -> Result<RawTurn> {
+        let options = PromptOptions {
+            agent: Some(Self::agent_name(side)),
+            model: self.config.model(side),
+        };
+        let attempts = self.config.retry.attempts.max(1);
+        let mut delay = self.config.retry.backoff;
+        let mut attempt = 1;
+
+        loop {
+            let fault = match self.attempt_turn(side, prompt, &options).await {
+                Ok(raw) => match fault_of(&raw) {
+                    None => {
+                        if attempt > 1 {
+                            info!(%side, attempt, "turn succeeded on retry");
+                        }
+                        return Ok(raw);
+                    }
+                    Some(fault) => fault,
+                },
+                // A transport failure is indistinguishable from a slow one
+                // that recovered, so it is retried on the same terms.
+                Err(error) if error.is_retryable() => TurnFault::Transient(error.to_string()),
+                Err(error) => return Err(error),
+            };
+
+            let reason = match fault {
+                TurnFault::Permanent(reason) => {
+                    error!(%side, attempt, %reason, "turn failed for a reason retrying cannot fix");
+                    return Err(self.session_error(side, reason));
+                }
+                TurnFault::Transient(reason) => reason,
+            };
+
+            if attempt >= attempts {
+                error!(%side, attempts, %reason, "turn produced nothing on every attempt");
+                return Err(
+                    self.session_error(side, format!("{reason} (after {attempts} attempts)"))
+                );
+            }
+
+            warn!(
+                %side,
+                attempt,
+                of = attempts,
+                retry_in_ms = delay.as_millis(),
+                %reason,
+                "turn produced nothing, retrying"
+            );
+            sleep(delay).await;
+            delay = delay.saturating_mul(2);
+            attempt += 1;
         }
+    }
+
+    /// Build a session error naming the side that failed.
+    fn session_error(&self, side: Side, message: String) -> CoinError {
+        CoinError::Session {
+            session_id: self.session(side).to_string(),
+            message,
+        }
+    }
+
+    /// Run one side's turn and record it.
+    async fn take_turn(&self, state: &mut DebateState, side: Side) -> Result<usize> {
+        let prompt = self.format.turn_prompt(state, side);
+        let raw = self.turn_with_retries(side, &prompt).await?;
 
         let (prose, analysis) = self.format.parse_turn(&raw.text);
 
@@ -222,11 +347,14 @@ where
     ///
     /// # Returns
     ///
-    /// The final state, with [`DebateState::stop_reason`] set.
+    /// The final state, with [`DebateState::stop_reason`] set. A side that
+    /// cannot produce a turn ends the debate with [`StopReason::Failed`]
+    /// rather than discarding the turns already taken.
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures from the client.
+    /// Does not fail on a failed turn. Reserved for failures that leave no
+    /// state worth returning.
     pub async fn run<F>(&self, mut on_progress: F) -> Result<DebateState>
     where
         F: FnMut(Progress) + Send,
@@ -238,7 +366,21 @@ where
             let round = state.current_round();
 
             on_progress(Progress::TurnStarted { side, round });
-            let index = self.take_turn(&mut state, side).await?;
+
+            // A side that cannot answer ends the debate rather than failing
+            // the call. The turns already taken cost real money and are still
+            // worth saving, and the transcript records why it stops here.
+            let index = match self.take_turn(&mut state, side).await {
+                Ok(index) => index,
+                Err(failure) => {
+                    error!(%side, %failure, "debate cannot continue");
+                    break StopReason::Failed {
+                        side,
+                        message: failure.to_string(),
+                    };
+                }
+            };
+
             if let Some(turn) = state.turns.get(index) {
                 on_progress(Progress::TurnCompleted(Box::new(turn.clone())));
             }
@@ -270,23 +412,43 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opencode::types::{MessageInfo, Part, Session, ToolState};
+    use crate::opencode::types::{
+        MessageError, MessageErrorData, MessageInfo, Part, Session, ToolState,
+    };
     use async_trait::async_trait;
     use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// One scripted turn.
+    #[derive(Debug, Clone)]
+    enum Reply {
+        /// The model answered with this text.
+        Text(&'static str),
+        /// The turn came back with no text and no stated reason.
+        Silent,
+        /// The provider rejected the turn, as opencode records it: a 200
+        /// response whose message carries no text and an error.
+        Rejected {
+            /// Status the provider returned.
+            status: u16,
+            /// Whether the provider marked it worth retrying.
+            retryable: bool,
+        },
+    }
 
     /// A client returning scripted replies, so the engine can be exercised
     /// with no network and no model spend.
     struct MockClient {
-        replies: Mutex<Vec<String>>,
+        replies: Mutex<Vec<Reply>>,
         prompts: Mutex<Vec<String>>,
         agents: Mutex<Vec<Option<String>>>,
         sessions_created: Mutex<usize>,
     }
 
     impl MockClient {
-        fn new(replies: &[&str]) -> Self {
+        fn new(replies: &[Reply]) -> Self {
             Self {
-                replies: Mutex::new(replies.iter().rev().map(|s| s.to_string()).collect()),
+                replies: Mutex::new(replies.iter().rev().cloned().collect()),
                 prompts: Mutex::new(Vec::new()),
                 agents: Mutex::new(Vec::new()),
                 sessions_created: Mutex::new(0),
@@ -323,11 +485,11 @@ mod tests {
         async fn messages(&self, _session_id: &str) -> Result<Vec<AssistantMessage>> {
             let reply = Self::lock(&self.replies)
                 .pop()
-                .unwrap_or_else(|| "```json\n{\"credence\": 50}\n```".to_string());
+                .unwrap_or(Reply::Text("```json\n{\"credence\": 50}\n```"));
 
             // Shaped like a real turn: a user message, then a tool-bearing
             // assistant message, then the final assistant message.
-            Ok(vec![
+            let mut messages = vec![
                 AssistantMessage {
                     info: MessageInfo {
                         role: "user".into(),
@@ -357,23 +519,43 @@ mod tests {
                         },
                     }],
                 },
-                AssistantMessage {
-                    info: MessageInfo {
-                        role: "assistant".into(),
-                        cost: 0.002,
-                        tokens: Tokens {
-                            input: 50,
-                            output: 20,
-                            reasoning: 0,
+            ];
+
+            let (text, error) = match reply {
+                Reply::Text(text) => (text.to_string(), None),
+                Reply::Silent => (String::new(), None),
+                Reply::Rejected { status, retryable } => (
+                    String::new(),
+                    Some(MessageError {
+                        name: "APIError".into(),
+                        data: MessageErrorData {
+                            message: "provider said no".into(),
+                            status_code: Some(status),
+                            is_retryable: Some(retryable),
                         },
-                        ..MessageInfo::default()
+                    }),
+                ),
+            };
+
+            messages.push(AssistantMessage {
+                info: MessageInfo {
+                    role: "assistant".into(),
+                    cost: 0.002,
+                    tokens: Tokens {
+                        input: 50,
+                        output: 20,
+                        reasoning: 0,
                     },
-                    parts: vec![Part::Text {
-                        id: "prt_2".into(),
-                        text: reply,
-                    }],
+                    error,
+                    ..MessageInfo::default()
                 },
-            ])
+                parts: vec![Part::Text {
+                    id: "prt_2".into(),
+                    text,
+                }],
+            });
+
+            Ok(messages)
         }
 
         async fn abort(&self, _session_id: &str) -> Result<()> {
@@ -391,11 +573,17 @@ mod tests {
             max_rounds,
             model_a: None,
             model_b: None,
+            // Retries are exercised here, so the backoff is removed rather
+            // than making the suite wait out a real one.
+            retry: RetryPolicy {
+                attempts: 3,
+                backoff: Duration::ZERO,
+            },
         }
     }
 
     async fn engine_with(
-        replies: &[&str],
+        replies: &[Reply],
         max_rounds: usize,
     ) -> (Engine<MockClient>, Arc<MockClient>) {
         let client = Arc::new(MockClient::new(replies));
@@ -415,10 +603,10 @@ mod tests {
         // the two credences restate to nearly the same view. 62 + 45 is 107,
         // seven points from agreement.
         let replies = [
-            "A opens.\n```json\n{\"credence\": 85}\n```",
-            "B opens.\n```json\n{\"credence\": 80}\n```",
-            "A concedes ground.\n```json\n{\"credence\": 62}\n```",
-            "B holds.\n```json\n{\"credence\": 45}\n```",
+            Reply::Text("A opens.\n```json\n{\"credence\": 85}\n```"),
+            Reply::Text("B opens.\n```json\n{\"credence\": 80}\n```"),
+            Reply::Text("A concedes ground.\n```json\n{\"credence\": 62}\n```"),
+            Reply::Text("B holds.\n```json\n{\"credence\": 45}\n```"),
         ];
         let (engine, _) = engine_with(&replies, 6).await;
 
@@ -435,10 +623,10 @@ mod tests {
         // Arrange: both sides stay certain of their own opposing position, so
         // they never approach agreement. 95 + 95 is 90 points from it.
         let replies = [
-            "A.\n```json\n{\"credence\": 95}\n```",
-            "B.\n```json\n{\"credence\": 95}\n```",
-            "A.\n```json\n{\"credence\": 95}\n```",
-            "B.\n```json\n{\"credence\": 95}\n```",
+            Reply::Text("A.\n```json\n{\"credence\": 95}\n```"),
+            Reply::Text("B.\n```json\n{\"credence\": 95}\n```"),
+            Reply::Text("A.\n```json\n{\"credence\": 95}\n```"),
+            Reply::Text("B.\n```json\n{\"credence\": 95}\n```"),
         ];
         let (engine, _) = engine_with(&replies, 2).await;
 
@@ -489,7 +677,13 @@ mod tests {
     #[tokio::test]
     async fn prose_reaches_the_transcript_without_its_json_block() {
         // Arrange
-        let (engine, _) = engine_with(&["My argument.\n```json\n{\"credence\": 70}\n```"], 1).await;
+        let (engine, _) = engine_with(
+            &[Reply::Text(
+                "My argument.\n```json\n{\"credence\": 70}\n```",
+            )],
+            1,
+        )
+        .await;
 
         // Act
         let state = engine.run(|_| {}).await.expect("debate must run");
@@ -502,7 +696,7 @@ mod tests {
     #[tokio::test]
     async fn a_turn_without_structure_still_records() {
         // Arrange: the model ignored the format instruction.
-        let (engine, _) = engine_with(&["Just prose, no block."], 1).await;
+        let (engine, _) = engine_with(&[Reply::Text("Just prose, no block.")], 1).await;
 
         // Act
         let state = engine.run(|_| {}).await.expect("debate must run");
@@ -510,6 +704,114 @@ mod tests {
         // Assert: the debate continues rather than failing.
         assert_eq!(state.turns[0].text, "Just prose, no block.");
         assert!(!state.turns[0].analysis.parse_status.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_silent_turn_is_retried_until_the_side_speaks() {
+        // Arrange: the provider throttles the first attempt, drops the second
+        // without saying why, then answers.
+        let replies = [
+            Reply::Rejected {
+                status: 429,
+                retryable: true,
+            },
+            Reply::Silent,
+            Reply::Text("A finally speaks.\n```json\n{\"credence\": 80}\n```"),
+        ];
+        let (engine, client) = engine_with(&replies, 1).await;
+
+        // Act
+        let state = engine.run(|_| {}).await.expect("debate must run");
+
+        // Assert: the turn that reached the transcript is the one with content,
+        // and the two dead attempts left nothing behind.
+        assert_eq!(state.turns[0].text, "A finally speaks.");
+        assert_eq!(
+            MockClient::lock(&client.prompts).len(),
+            4,
+            "3 for A, 1 for B"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_side_that_never_speaks_ends_the_debate_with_what_it_has() {
+        // Arrange: A opens, B answers, then A goes silent for good.
+        let replies = [
+            Reply::Text("A opens.\n```json\n{\"credence\": 80}\n```"),
+            Reply::Text("B answers.\n```json\n{\"credence\": 80}\n```"),
+            Reply::Silent,
+            Reply::Silent,
+            Reply::Silent,
+        ];
+        let (engine, _) = engine_with(&replies, 6).await;
+
+        // Act
+        let state = engine
+            .run(|_| {})
+            .await
+            .expect("a failed turn must not fail the run");
+
+        // Assert: the two completed turns survive, and the transcript records
+        // which side stopped and why.
+        assert_eq!(state.turns.len(), 2);
+        match state.stop_reason {
+            Some(StopReason::Failed { side, ref message }) => {
+                assert_eq!(side, Side::A);
+                assert!(
+                    message.contains("after 3 attempts"),
+                    "message was: {message}"
+                );
+            }
+            other => panic!("expected a failed stop, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_retrying_cannot_fix_is_not_retried() {
+        // Arrange: 402, out of credit. Waiting only arrives at the same answer
+        // several minutes later.
+        let (engine, client) = engine_with(
+            &[Reply::Rejected {
+                status: 402,
+                retryable: false,
+            }],
+            2,
+        )
+        .await;
+
+        // Act
+        let state = engine
+            .run(|_| {})
+            .await
+            .expect("a failed turn must not fail the run");
+
+        // Assert: one attempt only, and the provider's own words are kept.
+        assert_eq!(MockClient::lock(&client.prompts).len(), 1);
+        match state.stop_reason {
+            Some(StopReason::Failed { ref message, .. }) => {
+                assert!(message.contains("402"), "message was: {message}");
+                assert!(
+                    message.contains("provider said no"),
+                    "message was: {message}"
+                );
+            }
+            other => panic!("expected a failed stop, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_prose_but_no_structure_is_not_retried() {
+        // Arrange: the model argued but ignored the format instruction. The
+        // argument is worth keeping, and re-rolling it would pay twice to
+        // discard a real turn.
+        let (engine, client) = engine_with(&[Reply::Text("Just prose, no block.")], 1).await;
+
+        // Act
+        let state = engine.run(|_| {}).await.expect("debate must run");
+
+        // Assert
+        assert_eq!(state.turns[0].text, "Just prose, no block.");
+        assert_eq!(MockClient::lock(&client.prompts).len(), 2, "one turn each");
     }
 
     #[tokio::test]
@@ -547,7 +849,9 @@ mod tests {
     async fn the_opponents_argument_is_carried_into_the_next_prompt() {
         // Arrange
         let (engine, client) = engine_with(
-            &["A's distinctive point.\n```json\n{\"credence\": 80}\n```"],
+            &[Reply::Text(
+                "A's distinctive point.\n```json\n{\"credence\": 80}\n```",
+            )],
             1,
         )
         .await;

@@ -340,6 +340,17 @@ pub enum StopReason {
     RoundCap,
     /// The operator stopped it.
     Aborted,
+    /// A side could not produce a turn, so there was nothing left to debate.
+    ///
+    /// Distinct from every other reason here: the debate did not reach a
+    /// result, and whatever numbers it did collect are partial. Recording it
+    /// keeps a saved transcript honest about why it stops where it does.
+    Failed {
+        /// The side whose turn could not be produced.
+        side: Side,
+        /// What went wrong, as reported by opencode or the provider.
+        message: String,
+    },
 }
 
 /// Everything known about a debate in progress.
