@@ -30,6 +30,28 @@ the benchmark. A debater arguing about an API's behavior can read its source.
 This is the central bet of the project — a debate where claims can be checked
 beats a debate where they can only be asserted.
 
+### 1.0a The name
+
+**Coin**, as in two sides of the same coin: one question, two faces of it, and
+a result that depends on looking at both. The name is settled and not worth
+revisiting.
+
+Renaming was considered and rejected in September 2026. The two arguments
+against `coin` are real and were weighed: it collides with cryptocurrency in
+search and first impressions, and "flip a coin" connotes deciding *arbitrarily*,
+which is the opposite of the goal stated above. Neither outweighs churning a
+name that is short, typeable, and already embedded in the binary, the module
+paths, `CoinError`, `COIN_TEST_MODEL`, and `$XDG_DATA_HOME/coin`.
+
+Alternatives that were rejected, so they are not proposed again:
+
+| Candidate  | Why not                                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------------------------- |
+| `abtest`   | A/B testing already means randomized experiments over a user population. It would mis-file the project on sight, and captures only `Side::A`/`Side::B`, an implementation detail |
+| `crux`     | Legible and names the real output, but collides with the crux-finding format in section 4.1: `--format crux` |
+| `agon`     | The formal debate scene in Greek drama, and exactly apt, but obscure enough to need explaining every time  |
+| `assay`    | Pairs with the coin metaphor, without enough payoff to justify the move                                    |
+
 ### 1.1 Non-goals
 
 - Not a general chat interface. One debate at a time, one purpose.
