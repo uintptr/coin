@@ -54,7 +54,7 @@ edit a turn, or abort at any point.
 | Position B | text | The case the second debater is assigned |
 | Format | enum | One of the four in section 4 |
 | Model A / B / Judge | string | `provider/model`, defaults to the same model on both sides |
-| Max rounds | integer | Hard cap, default 6 |
+| Max rounds | integer | Hard cap, default 3 |
 | Tools enabled | multi | Defaults from detected tool availability |
 | Judge summary | bool | Default on |
 | Step mode | bool | Default off; pause after every turn |
@@ -417,12 +417,14 @@ is also the session project directory:
 
 ```
 $XDG_DATA_HOME/coin/debates/<debate-id>/
-  opencode.jsonc          generated: permission policy, model defaults
   .opencode/agent/
-    side-a.md  side-b.md  judge.md
-  transcript.json         appended as the debate runs
-  workspace/              debater scratch space for tool use
+    debater-a.md  debater-b.md    written before launch
+  transcript.json  transcript.md  written when the debate ends
+  .git/                           required; see section 5.1
 ```
+
+A `judge.md` agent joins this in step 10, and a generated `opencode.jsonc`
+carrying the permission policy of section 7 in step 9. Neither is written yet.
 
 Generating agents here rather than in the user's own config keeps debate
 personas from leaking into their normal opencode usage.
@@ -632,39 +634,47 @@ ready-to-render values. The JavaScript only emits inline SVG from them.
 
 ## 11. Layout and dependencies
 
+The target layout. Entries marked *planned* do not exist yet; see
+`PROJECT_STATE.md` for what is built.
+
 ```
 coin/
   Cargo.toml
-  PROJECT_SPECS.md
+  PROJECT_SPECS.md  PROJECT_STATE.md
   src/
-    main.rs                 clap CLI: --port, --open, --data-dir, --no-browser
-    config.rs               AppConfig, dotenvy, defaults
-    error.rs                thiserror AppError + axum IntoResponse
+    main.rs                 clap CLI: probe, debate
+    config.rs               timeouts, data directory resolution
+    error.rs                CoinError via thiserror
+    term.rs                 terminal colour for the CLI
+    store.rs                transcript persistence and export
     opencode/
       process.rs            spawn, port discovery, health poll, kill-on-drop
-      client.rs             sessions, prompt, abort, permissions
+      client.rs             OpencodeClient trait, HttpClient
       events.rs             SSE consumer -> typed events
       types.rs              serde models for the REST surface
-      workspace.rs          per-debate dir, agents, opencode.jsonc
+      workspace.rs          per-debate dir, git init, agent files
     debate/
-      format.rs             DebateFormat trait, FormatId, StopReason
-      crux.rs  credence.rs  classic.rs  ledger.rs
-      state.rs              DebateState, Turn, Claim, Credence, Transcript
-      engine.rs             orchestrator task + command state machine
+      format.rs             DebateFormat trait, FormatId
+      state.rs              DebateState, Turn, Credence, StopReason
+      engine.rs             orchestrator
       parse.rs              tolerant fenced-JSON extraction
-      judge.rs              final verdict pass
-    web/
+      credence.rs           the credence format
+      crux.rs  classic.rs  ledger.rs      planned, step 7
+      judge.rs                            planned, step 10
+    web/                                  planned, step 6
       routes.rs             axum router + embedded static serving
       stream.rs             broadcast -> axum SSE
       api.rs                control handlers
-    store.rs                persistence and export
-  web/  index.html  app.js  styles.css
+  web/  index.html  app.js  styles.css    planned, step 6
 ```
 
-`axum`, `tokio`, `tower-http` (trace, compression, timeout), `reqwest`
-(json, stream), `eventsource-stream`, `serde`, `serde_json`, `thiserror`,
-`anyhow`, `tracing`, `tracing-subscriber`, `clap`, `dotenvy`, `rust-embed`,
+In use today: `tokio`, `reqwest` (json, stream), `eventsource-stream`,
+`futures-util`, `async-trait`, `serde`, `serde_json`, `thiserror`, `anyhow`,
+`tracing`, `tracing-subscriber`, `clap`, `chrono`, `dirs`, `dotenvy`, `rand`,
 `uuid`.
+
+Added with the web layer in step 6: `axum`, `tower-http` (trace, compression,
+timeout), `rust-embed`.
 
 ## 12. Build order
 
@@ -717,5 +727,5 @@ coin/
 | Exa search is experimental and flag-gated | Startup capability detection, UI disables what is absent |
 | opencode API drift across releases | Integration isolated to `opencode/`, pinned version noted, ignored integration test catches breakage |
 | Cost accumulates quickly with tools | Live token and cost totals in the footer, hard round cap; tests pin a cheap model |
-| Cheap models may not invoke tools at all | Observed during model selection: several cheap models answered as if they had run a tool without calling one. Model choice for debaters is therefore a correctness concern, not only a cost one, and the UI surfaces which model each side used |
+| Models vary in how well calibrated their stated confidence is | Observed during model selection: a candidate reported 20 percent confidence in a position the evidence plainly supported. A miscalibrated debater corrupts the convergence reading, so model choice is a correctness concern and not only a cost one, and the UI surfaces which model each side used |
 | Debaters collapse into agreement without reasoning | Prompts explicitly reward justified movement and penalize unjustified concession; the credence chart makes a suspicious collapse visible |

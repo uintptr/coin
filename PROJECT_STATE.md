@@ -5,7 +5,7 @@ picking the work up, and the last thing to update before finishing a session.
 `PROJECT_SPECS.md` holds the design and changes rarely; this file tracks where
 the work actually is and is expected to change constantly.
 
-**Last updated:** 2026-08-31
+**Last updated:** 2026-09-01
 **Build order position:** steps 1-5 complete; step 6 is next
 
 Deliberately no commit hash here — git already knows it, and a hash copied into
@@ -56,7 +56,7 @@ opencode's wire format.
 | `src/debate/engine.rs` | Orchestrator: two sessions, alternating turns, stop conditions |
 | `src/store.rs` | Transcript persistence: versioned JSON plus readable Markdown |
 | `src/term.rs` | Terminal colour, honouring NO_COLOR and non-TTY output |
-| `src/main.rs` | `coin debate`, with live per-side colour streaming |
+| `src/main.rs` | `coin debate`, live per-side colour streaming, file-or-string topic arguments |
 
 Personas are delivered as generated agent files, which replace opencode's
 built-in coding prompt rather than adding to it. Each debate gets a disposable
@@ -71,9 +71,8 @@ Every debate auto-saves `transcript.json` and `transcript.md` into its
 workspace; `--save FILE` writes an extra copy anywhere.
 
 **Tests:** 112 library tests, 8 binary tests, and 6 doctests run offline and
-free. 4 integration
-tests marked `#[ignore]` drive a real server, take about 5 seconds, and cost
-well under a cent.
+free. 4 integration tests marked `#[ignore]` drive a real server, take about
+5 seconds, and cost well under a cent.
 
 ## Not done
 
@@ -136,6 +135,13 @@ rediscovered:
 8. **Agent files replace the built-in system prompt** and are read at server
    startup, so they must be written before launch.
 
+**A correction worth keeping.** An earlier note here claimed cheap models
+fabricate tool use, and that tool invocation over REST was unreliable. Both were
+wrong, and both came from fact 7: tool calls sit in earlier assistant messages,
+and the prompt response returns only the last one. The models were calling tools
+correctly the whole time. Verified afterwards by asking a model to read a file
+whose contents it could not know and watching it report them.
+
 ## Open questions
 
 - **Personas versus a long-lived server.** Agent files are read at opencode
@@ -144,10 +150,9 @@ rediscovered:
 - **Debate cost.** Now roughly $0.008 for a two-turn debate on the default
   model, down from about $0.24 per four turns on kimi-k3. Still worth surfacing
   running cost in the UI.
-- **Speed varies enormously by model.** The default takes around 90 seconds per
-  turn with web search, and a two-round debate can exceed 400 seconds. One
-  candidate needed over 400 seconds for two rounds. Slow turns will matter more
-  once a browser is waiting on them.
+- **Speed varies enormously by model.** The default exceeded 400 seconds on a
+  single round with web search, while gpt-oss-120b finished two rounds in under
+  a minute. Slow turns will matter more once a browser is waiting on them.
 - **The default model choice rests on one benchmark run.** gpt-oss-120b was
   rejected for reporting 20 percent confidence in an obviously supported
   position, but in a later run it produced a perfectly calibrated result at an
@@ -160,9 +165,6 @@ rediscovered:
   twelve turns had no usable structure. The convergence check runs on the most
   recent readable value, so it can compare stale numbers across a long gap. The
   count is now reported, but the underlying parse rate is worth investigating.
-- **Cheap models may fabricate tool use.** Several answered as though they had
-  run a tool without calling one. Model choice for debaters is a correctness
-  concern, not only a cost one.
 - **A listed model is not necessarily usable.** DigitalOcean rejects parts of
   its catalog with subscription-tier and not-found errors, surfacing as an
   opaque `UnknownError` with the real cause only in the server log.
