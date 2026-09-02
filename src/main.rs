@@ -574,7 +574,95 @@ fn print_summary(state: &DebateState) {
     }
 
     println!("ended: {}", store::describe_stop(&state.stop_reason));
+    print!("{}", format_findings(state));
     print!("{}", format_usage(state));
+}
+
+/// Render what the debate established.
+///
+/// Everything here was recorded as the debate ran and then scrolled past: a
+/// concession arrives mid-argument and is gone by the time the debate ends,
+/// which is the single most valuable thing it produces. Gathering the movement,
+/// the concessions, and what each case finally rested on puts the result in one
+/// place without asking a model to summarize anything, so it costs nothing and
+/// cannot invent a finding the debate did not reach.
+///
+/// # Arguments
+///
+/// * `state` - The finished debate
+///
+/// # Returns
+///
+/// The findings block, or an empty string when the debate recorded none, so a
+/// failed or wholly unreadable debate prints no empty heading.
+fn format_findings(state: &DebateState) -> String {
+    let movements: Vec<_> = [Side::A, Side::B]
+        .into_iter()
+        .filter_map(|side| state.movement(side))
+        .collect();
+    let concessions = state.concessions();
+    let claims: Vec<_> = [Side::A, Side::B]
+        .into_iter()
+        .filter_map(|side| state.key_claim(side).map(|claim| (side, claim)))
+        .collect();
+    let tools = state.tool_tally();
+
+    if movements.is_empty() && concessions.is_empty() && claims.is_empty() && tools.is_empty() {
+        return String::new();
+    }
+
+    let mut out = format!("\n{}\n", paint(Style::Heading, "Findings"));
+    let label = |side: Side, text: &str| {
+        format!(
+            "  {} {}",
+            paint(Style::for_side(side), side.to_string()),
+            paint(Style::Dim, text)
+        )
+    };
+
+    for movement in &movements {
+        // One reading is a stated position, not a movement, so say which.
+        let change = if movement.readings < 2 {
+            "stated once, no movement to measure".to_string()
+        } else {
+            format!(
+                "opened {}, ended {}   ({:+})",
+                movement.opened,
+                movement.closed,
+                movement.delta()
+            )
+        };
+        out.push_str(&format!("{}\n", label(movement.side, &change)));
+    }
+
+    if !concessions.is_empty() {
+        out.push('\n');
+        for concession in &concessions {
+            out.push_str(&format!(
+                "{} {}\n",
+                label(concession.side, "conceded"),
+                concession.text
+            ));
+        }
+    }
+
+    if !claims.is_empty() {
+        out.push('\n');
+        for (side, claim) in &claims {
+            out.push_str(&format!("{} {claim}\n", label(*side, "rests on")));
+        }
+    }
+
+    if !tools.is_empty() {
+        let tally = tools
+            .iter()
+            .map(|(tool, count)| format!("{tool} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("\n  {} {tally}\n", paint(Style::Dim, "tools")));
+    }
+
+    out
 }
 
 /// Render what the debate spent, per side and in total.
@@ -759,6 +847,124 @@ mod tests {
             );
         }
         state
+    }
+
+    /// A debate with movement, concessions, key claims and tool use.
+    fn debate_with_findings() -> DebateState {
+        use coin::debate::state::{ParseStatus, TurnAnalysis};
+        use coin::opencode::types::{Tokens, ToolCall};
+
+        let mut state = DebateState::new(Topic::new("q", "a", "b"), 3);
+        let rows = [
+            (
+                Side::A,
+                85_u8,
+                vec![],
+                "the causal direction runs the other way",
+            ),
+            (
+                Side::B,
+                80,
+                vec![],
+                "the replication failed on the same data",
+            ),
+            (
+                Side::A,
+                62,
+                vec!["the 2019 figure was superseded".to_string()],
+                "the causal direction runs the other way",
+            ),
+            (
+                Side::B,
+                45,
+                vec!["the effect size is smaller than I claimed".to_string()],
+                "the replication failed on the same data",
+            ),
+        ];
+
+        for (side, credence, conceded, claim) in rows {
+            let mut analysis = TurnAnalysis::empty(ParseStatus::Ok);
+            analysis.credence = Credence::new(credence);
+            analysis.conceded = conceded;
+            analysis.key_claim = Some(claim.to_string());
+            state.push_turn(
+                side,
+                "argument".into(),
+                analysis,
+                vec![ToolCall {
+                    tool: "websearch".to_string(),
+                    status: "completed".to_string(),
+                    detail: String::new(),
+                }],
+                Tokens::default(),
+                0.001,
+            );
+        }
+        state
+    }
+
+    #[test]
+    fn findings_report_movement_concessions_and_claims() {
+        // Arrange
+        let state = debate_with_findings();
+
+        // Act
+        let block = format_findings(&state);
+
+        // Assert: the direction of movement is signed, since a side that
+        // talked itself down did something different from one that dug in.
+        assert!(block.contains("opened 85, ended 62"), "block was:\n{block}");
+        assert!(block.contains("(-23)"), "block was:\n{block}");
+        assert!(block.contains("(-35)"), "block was:\n{block}");
+        assert!(
+            block.contains("conceded the 2019 figure was superseded"),
+            "block was:\n{block}"
+        );
+        assert!(
+            block.contains("rests on the causal direction runs the other way"),
+            "block was:\n{block}"
+        );
+        assert!(block.contains("tools websearch 4"), "block was:\n{block}");
+    }
+
+    #[test]
+    fn a_debate_with_nothing_to_report_prints_no_findings_block() {
+        // Arrange: a debate that failed before either side spoke. An empty
+        // heading over nothing is worse than no heading.
+        let state = DebateState::new(Topic::new("q", "a", "b"), 3);
+
+        // Act and assert
+        assert!(format_findings(&state).is_empty());
+    }
+
+    #[test]
+    fn a_single_reading_is_not_reported_as_holding_firm() {
+        // Arrange: one readable turn per side. The delta would be zero, which
+        // would read as a side that refused to move.
+        use coin::debate::state::{ParseStatus, TurnAnalysis};
+        use coin::opencode::types::Tokens;
+
+        let mut state = DebateState::new(Topic::new("q", "a", "b"), 3);
+        let mut analysis = TurnAnalysis::empty(ParseStatus::Ok);
+        analysis.credence = Credence::new(65);
+        state.push_turn(
+            Side::A,
+            "argument".into(),
+            analysis,
+            Vec::new(),
+            Tokens::default(),
+            0.0,
+        );
+
+        // Act
+        let block = format_findings(&state);
+
+        // Assert
+        assert!(
+            block.contains("stated once, no movement to measure"),
+            "block was:\n{block}"
+        );
+        assert!(!block.contains("(+0)"), "block was:\n{block}");
     }
 
     #[test]

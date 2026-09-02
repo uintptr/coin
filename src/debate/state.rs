@@ -291,6 +291,45 @@ pub struct Turn {
     pub cost: f64,
 }
 
+/// How one side's stated confidence moved across a debate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Movement {
+    /// The side measured.
+    pub side: Side,
+    /// Its first readable confidence.
+    pub opened: Credence,
+    /// Its last readable confidence.
+    pub closed: Credence,
+    /// How many readable confidences it stated. One means the movement is
+    /// unknown rather than zero.
+    pub readings: usize,
+}
+
+impl Movement {
+    /// Change in stated confidence, in percentage points.
+    ///
+    /// Signed, because the direction is the point: a side that talked itself
+    /// down has done something different from one that dug in.
+    ///
+    /// # Returns
+    ///
+    /// Closing confidence minus opening, from -100 to 100.
+    pub fn delta(&self) -> i16 {
+        i16::from(self.closed.value()) - i16::from(self.opened.value())
+    }
+}
+
+/// A point one side gave up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Concession {
+    /// The side that conceded it.
+    pub side: Side,
+    /// Round it was conceded in.
+    pub round: usize,
+    /// What was conceded, as the side put it.
+    pub text: String,
+}
+
 /// Token and cost accounting over a set of turns.
 ///
 /// A debate spends real money, so what it spent is part of the result rather
@@ -533,6 +572,118 @@ impl DebateState {
             .iter()
             .filter(|turn| !turn.analysis.parse_status.is_ok())
             .count()
+    }
+
+    /// Turns one side took, oldest first.
+    fn turns_of(&self, side: Side) -> impl DoubleEndedIterator<Item = &Turn> {
+        self.turns.iter().filter(move |turn| turn.side == side)
+    }
+
+    /// How one side's stated confidence moved across the debate.
+    ///
+    /// Measured between the first and last **readable** readings, not the
+    /// first and last turns. A turn whose structured block could not be read
+    /// states no confidence, so counting it as unchanged would invent a
+    /// steadiness the side never expressed.
+    ///
+    /// # Arguments
+    ///
+    /// * `side` - The side to measure
+    ///
+    /// # Returns
+    ///
+    /// `None` when the side never stated a readable confidence.
+    pub fn movement(&self, side: Side) -> Option<Movement> {
+        let mut readings = self
+            .turns_of(side)
+            .filter_map(|turn| turn.analysis.credence)
+            .peekable();
+
+        let opened = readings.next()?;
+        let mut closed = opened;
+        let mut count = 1;
+        for value in readings {
+            closed = value;
+            count += 1;
+        }
+
+        Some(Movement {
+            side,
+            opened,
+            closed,
+            readings: count,
+        })
+    }
+
+    /// Every point either side gave up, in the order it was conceded.
+    ///
+    /// This is the most valuable thing a debate produces and the easiest to
+    /// lose: a concession arrives mid-argument and scrolls away. Gathering
+    /// them puts the debate's actual movement in one place.
+    ///
+    /// # Returns
+    ///
+    /// One entry per conceded point, blank entries dropped.
+    pub fn concessions(&self) -> Vec<Concession> {
+        self.turns
+            .iter()
+            .flat_map(|turn| {
+                turn.analysis
+                    .conceded
+                    .iter()
+                    .filter(|point| !point.trim().is_empty())
+                    .map(move |point| Concession {
+                        side: turn.side,
+                        round: turn.round,
+                        text: point.trim().to_string(),
+                    })
+            })
+            .collect()
+    }
+
+    /// The claim a side's case finally rested on.
+    ///
+    /// The **last** one stated, not the first: a side that revised what its
+    /// argument depends on has told us something, and the closing position is
+    /// the one that survived the debate.
+    ///
+    /// # Arguments
+    ///
+    /// * `side` - The side to read
+    ///
+    /// # Returns
+    ///
+    /// `None` when the side never stated one readably.
+    pub fn key_claim(&self, side: Side) -> Option<&str> {
+        self.turns_of(side)
+            .rev()
+            .find_map(|turn| turn.analysis.key_claim.as_deref())
+            .map(str::trim)
+            .filter(|claim| !claim.is_empty())
+    }
+
+    /// Tools invoked across the debate, tallied by name.
+    ///
+    /// Which tools a debate reached for says how much of it was checked
+    /// against the world rather than asserted, which is the project's whole
+    /// premise.
+    ///
+    /// # Returns
+    ///
+    /// Tool names with their invocation counts, most used first, ties broken
+    /// by name so the order is stable.
+    pub fn tool_tally(&self) -> Vec<(&str, usize)> {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+
+        for call in self.turns.iter().flat_map(|turn| turn.tool_calls.iter()) {
+            match counts.iter_mut().find(|(name, _)| *name == call.tool) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((&call.tool, 1)),
+            }
+        }
+
+        counts.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
+        counts
     }
 
     /// Accounting across every turn.
@@ -825,6 +976,147 @@ mod tests {
         // Act and assert
         assert_eq!(low.distance(high), 65);
         assert_eq!(high.distance(low), 65);
+    }
+
+    #[test]
+    fn movement_spans_the_first_and_last_readable_readings() {
+        // Arrange: A opens at 80 and ends at 70, B opens at 20 and ends at 35.
+        let state = state_with_credences(&[Some(80), Some(20), Some(70), Some(35)]);
+
+        // Act
+        let a = state.movement(Side::A).expect("A stated confidences");
+        let b = state.movement(Side::B).expect("B stated confidences");
+
+        // Assert: the sign carries the direction, which is the point.
+        assert_eq!((a.opened.value(), a.closed.value()), (80, 70));
+        assert_eq!(a.delta(), -10);
+        assert_eq!(b.delta(), 15);
+        assert_eq!(a.readings, 2);
+    }
+
+    #[test]
+    fn movement_skips_turns_whose_structure_was_unreadable() {
+        // Arrange: A states 90, then a turn that could not be read, then 40.
+        // Counting the unreadable turn as unchanged would invent a steadiness
+        // the side never expressed.
+        let state = state_with_credences(&[Some(90), None, None, None, Some(40), None]);
+
+        // Act
+        let a = state.movement(Side::A).expect("A stated confidences");
+
+        // Assert
+        assert_eq!(a.delta(), -50);
+        assert_eq!(a.readings, 2, "the unreadable turn must not count");
+    }
+
+    #[test]
+    fn a_side_that_never_stated_a_confidence_has_no_movement() {
+        // Arrange
+        let state = state_with_credences(&[None, None]);
+
+        // Act and assert
+        assert!(state.movement(Side::A).is_none());
+    }
+
+    #[test]
+    fn a_single_reading_is_reported_as_one_rather_than_as_no_change() {
+        // Arrange: one readable turn. Delta is zero, but that is unknown
+        // movement, not a side holding firm, so the count says which.
+        let state = state_with_credences(&[Some(65), None]);
+
+        // Act
+        let a = state.movement(Side::A).expect("A stated one confidence");
+
+        // Assert
+        assert_eq!(a.readings, 1);
+        assert_eq!(a.delta(), 0);
+    }
+
+    #[test]
+    fn concessions_are_gathered_in_order_with_their_side_and_round() {
+        // Arrange
+        let mut state = DebateState::new(Topic::new("q", "a", "b"), 3);
+        let mut first = TurnAnalysis::empty(ParseStatus::Ok);
+        first.conceded = vec!["the 2019 figure was superseded".into(), "   ".into()];
+        let mut second = TurnAnalysis::empty(ParseStatus::Ok);
+        second.conceded = vec!["  the effect size is smaller  ".into()];
+
+        for (side, analysis) in [(Side::A, first), (Side::B, second)] {
+            state.push_turn(
+                side,
+                "argument".into(),
+                analysis,
+                Vec::new(),
+                Tokens::default(),
+                0.0,
+            );
+        }
+
+        // Act
+        let conceded = state.concessions();
+
+        // Assert: blank entries are dropped and text is trimmed.
+        assert_eq!(conceded.len(), 2);
+        assert_eq!(conceded[0].side, Side::A);
+        assert_eq!(conceded[0].round, 1);
+        assert_eq!(conceded[0].text, "the 2019 figure was superseded");
+        assert_eq!(conceded[1].text, "the effect size is smaller");
+    }
+
+    #[test]
+    fn the_key_claim_is_the_last_one_a_side_stated() {
+        // Arrange: a side that revised what its argument depends on has told
+        // us something, and the closing position is the one that survived.
+        let mut state = DebateState::new(Topic::new("q", "a", "b"), 3);
+        for claim in ["the first thing", "the thing it settled on"] {
+            let mut analysis = TurnAnalysis::empty(ParseStatus::Ok);
+            analysis.key_claim = Some(claim.to_string());
+            state.push_turn(
+                Side::A,
+                "argument".into(),
+                analysis,
+                Vec::new(),
+                Tokens::default(),
+                0.0,
+            );
+        }
+
+        // Act and assert
+        assert_eq!(state.key_claim(Side::A), Some("the thing it settled on"));
+        assert_eq!(state.key_claim(Side::B), None);
+    }
+
+    #[test]
+    fn tools_are_tallied_most_used_first() {
+        // Arrange
+        let mut state = DebateState::new(Topic::new("q", "a", "b"), 3);
+        let call = |tool: &str| ToolCall {
+            tool: tool.to_string(),
+            status: "completed".to_string(),
+            detail: String::new(),
+        };
+        state.push_turn(
+            Side::A,
+            "argument".into(),
+            TurnAnalysis::empty(ParseStatus::Ok),
+            vec![call("websearch"), call("bash"), call("websearch")],
+            Tokens::default(),
+            0.0,
+        );
+        state.push_turn(
+            Side::B,
+            "argument".into(),
+            TurnAnalysis::empty(ParseStatus::Ok),
+            vec![call("websearch"), call("read")],
+            Tokens::default(),
+            0.0,
+        );
+
+        // Act
+        let tally = state.tool_tally();
+
+        // Assert: ties break by name so the order is stable across runs.
+        assert_eq!(tally, vec![("websearch", 3), ("bash", 1), ("read", 1)]);
     }
 
     #[test]

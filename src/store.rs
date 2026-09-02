@@ -164,6 +164,66 @@ impl<'a> Transcript<'a> {
         }
     }
 
+    /// Write what the debate established, gathered from its turns.
+    ///
+    /// The same findings the CLI prints, so a transcript read months later
+    /// says what the debate concluded without rereading every turn. Omitted
+    /// entirely when the debate recorded none, rather than left as an empty
+    /// heading.
+    fn write_findings(&self, out: &mut String) {
+        let movements: Vec<_> = [Side::A, Side::B]
+            .into_iter()
+            .filter_map(|side| self.state.movement(side))
+            .collect();
+        let concessions = self.state.concessions();
+        let claims: Vec<_> = [Side::A, Side::B]
+            .into_iter()
+            .filter_map(|side| self.state.key_claim(side).map(|claim| (side, claim)))
+            .collect();
+        let tools = self.state.tool_tally();
+
+        if movements.is_empty() && concessions.is_empty() && claims.is_empty() && tools.is_empty() {
+            return;
+        }
+
+        out.push_str("**Findings**\n\n");
+
+        for movement in &movements {
+            if movement.readings < 2 {
+                out.push_str(&format!(
+                    "- **{}** stated {} once, so there is no movement to measure\n",
+                    movement.side, movement.opened
+                ));
+            } else {
+                out.push_str(&format!(
+                    "- **{}** opened at {} and ended at {} ({:+})\n",
+                    movement.side,
+                    movement.opened,
+                    movement.closed,
+                    movement.delta()
+                ));
+            }
+        }
+        for concession in &concessions {
+            out.push_str(&format!(
+                "- **{}** conceded in round {}: {}\n",
+                concession.side, concession.round, concession.text
+            ));
+        }
+        for (side, claim) in &claims {
+            out.push_str(&format!("- **{side}**'s case rests on: {claim}\n"));
+        }
+        if !tools.is_empty() {
+            let tally = tools
+                .iter()
+                .map(|(tool, count)| format!("{tool} {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("- Tools used: {tally}\n"));
+        }
+        out.push('\n');
+    }
+
     /// Write the convergence table and closing totals.
     fn write_result(&self, out: &mut String) {
         out.push_str("\n## Result\n\n");
@@ -205,6 +265,8 @@ impl<'a> Transcript<'a> {
             "**Outcome:** {}\n\n",
             describe_stop(&self.state.stop_reason)
         ));
+
+        self.write_findings(out);
 
         // Per side as well as in total: the two sides can run different
         // models, and which one the money went to is part of the result.
