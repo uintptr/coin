@@ -609,7 +609,7 @@ curl -s localhost:7777/api/transcript.md    # readable transcript
 
 ## 10. Web UI
 
-Per `AGENT_rust.md`: **Pico CSS and vanilla JavaScript only**. No React, no
+Per `rust.md`: **Pico CSS and vanilla JavaScript only**. No React, no
 jQuery, no component framework. Adaptive light and dark theming with an explicit
 toggle. Google Fonts for a distinct header and body pairing. A custom stylesheet
 rather than Pico defaults, themed to suit an adversarial-but-cooperative

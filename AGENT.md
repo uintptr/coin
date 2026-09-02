@@ -1,6 +1,6 @@
 # Agent Guidelines
 
-@AGENT_rust.md
+@rust.md
 
 ## Project documents
 

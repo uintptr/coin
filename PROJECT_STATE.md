@@ -212,7 +212,7 @@ Before committing: `cargo test`, `cargo clippy --all-targets -- -D warnings`,
 
 ## Conventions in force
 
-- `AGENT_rust.md` is binding: no `.unwrap()` in production paths, `where`
+- `rust.md` is binding: no `.unwrap()` in production paths, `where`
   clauses for generic bounds, `AsRef` on public functions taking strings or
   paths, doc comments on every public item, no emoji or emoji-like unicode
   anywhere including the UI, 4-space indent, 100-column lines.
