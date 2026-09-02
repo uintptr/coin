@@ -70,7 +70,9 @@ benchmarked as `digitalocean/glm-5.3-flash`; only the route changed, for half
 the price and no daily token quota.
 
 Every debate auto-saves `transcript.json` and `transcript.md` into its
-workspace; `--save FILE` writes an extra copy anywhere.
+workspace; `--save FILE` writes an extra copy anywhere. Both end with a usage
+table broken down per side, with reasoning tokens counted apart from output;
+see `PROJECT_SPECS.md` section 2.2a.
 
 Model defaults come from `config.toml` in the working directory or from
 `--config FILE`, with the command line winning over both. See

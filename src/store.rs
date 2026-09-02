@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::debate::format::FormatId;
-use crate::debate::state::{Credence, DebateState, StopReason};
+use crate::debate::state::{Credence, DebateState, Side, StopReason, Usage};
 use crate::error::{CoinError, Result};
 use crate::opencode::types::ModelRef;
 
@@ -206,14 +206,26 @@ impl<'a> Transcript<'a> {
             describe_stop(&self.state.stop_reason)
         ));
 
-        let tokens = self.state.total_tokens();
-        out.push_str(&format!(
-            "{} turns, {} tokens in, {} out, ${:.4}\n",
-            self.state.turns.len(),
-            tokens.input,
-            tokens.output,
-            self.state.total_cost()
-        ));
+        // Per side as well as in total: the two sides can run different
+        // models, and which one the money went to is part of the result.
+        out.push_str("| | turns | input | output | reasoning | cost |\n");
+        out.push_str("|---|---|---|---|---|---|\n");
+
+        let mut row = |label: &str, usage: &Usage| {
+            out.push_str(&format!(
+                "| {label} | {} | {} | {} | {} | ${:.4} |\n",
+                usage.turns,
+                usage.tokens.input,
+                usage.tokens.output,
+                usage.tokens.reasoning,
+                usage.cost
+            ));
+        };
+
+        for side in [Side::A, Side::B] {
+            row(&side.to_string(), &self.state.usage_for(side));
+        }
+        row("**total**", &self.state.usage());
     }
 }
 
@@ -324,7 +336,7 @@ async fn write_file(path: &Path, contents: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::debate::state::{Credence, ParseStatus, Side, Topic, TurnAnalysis};
+    use crate::debate::state::{ParseStatus, Topic, TurnAnalysis};
     use crate::opencode::types::{Tokens, ToolCall};
 
     /// A two-turn debate ending in agreement, with tool use on side A.
@@ -520,7 +532,27 @@ mod tests {
         let markdown = transcript_of(&state).to_markdown();
 
         assert!(markdown.contains("confidences converged, 5 points apart"));
-        assert!(markdown.contains("2 turns, 300 tokens in, 60 out, $0.0300"));
+        assert!(
+            markdown.contains("| **total** | 2 | 300 | 60 | 0 | $0.0300 |"),
+            "totals row missing from:\n{markdown}"
+        );
+    }
+
+    #[test]
+    fn markdown_breaks_usage_down_by_side() {
+        // The two sides can run different models, so which of them the money
+        // went to is part of the result rather than a detail.
+        let state = finished_debate();
+        let markdown = transcript_of(&state).to_markdown();
+
+        assert!(
+            markdown.contains("| A | 1 | 100 | 20 | 0 | $0.0100 |"),
+            "side A row missing from:\n{markdown}"
+        );
+        assert!(
+            markdown.contains("| B | 1 | 200 | 40 | 0 | $0.0200 |"),
+            "side B row missing from:\n{markdown}"
+        );
     }
 
     #[test]

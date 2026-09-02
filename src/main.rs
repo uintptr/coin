@@ -14,7 +14,7 @@ use coin::config::{DebateSettings, OpencodeConfig, RetryPolicy, Settings, data_d
 use coin::debate::engine::{DebateConfig, Engine, Progress};
 use coin::debate::format::FormatId;
 use coin::debate::format_for;
-use coin::debate::state::{Credence, DebateState, Side, StopReason, Topic};
+use coin::debate::state::{Credence, DebateState, Side, StopReason, Topic, Usage};
 use coin::error::{CoinError, Result};
 use coin::opencode::client::{HttpClient, OpencodeClient, PromptOptions};
 use coin::opencode::events::{Flow, stream_events};
@@ -574,21 +574,65 @@ fn print_summary(state: &DebateState) {
     }
 
     println!("ended: {}", store::describe_stop(&state.stop_reason));
+    print!("{}", format_usage(state));
+}
 
-    let tokens = state.total_tokens();
-    println!(
-        "{}",
-        paint(
-            Style::Dim,
-            format!(
-                "{} turns | {} in, {} out | ${:.4}",
-                state.turns.len(),
-                tokens.input,
-                tokens.output,
-                state.total_cost()
+/// Render what the debate spent, per side and in total.
+///
+/// The sides are broken out because they can run different models, and a
+/// single total hides which of them the money went to. Reasoning is its own
+/// column rather than folded into output: a model that reports thinking tokens
+/// bills them separately, so adding them to output would misstate both.
+///
+/// Columns are sized from the total row, which is always the widest, so the
+/// figures line up without a fixed width that a long debate would overflow.
+///
+/// Returns the block rather than printing it so the alignment can be tested.
+///
+/// # Arguments
+///
+/// * `state` - The finished debate
+///
+/// # Returns
+///
+/// The usage block, one line per side and one for the total.
+fn format_usage(state: &DebateState) -> String {
+    let total = state.usage();
+    let width = |value: u64| value.to_string().len();
+    let (turns, input, output, reasoning) = (
+        width(total.turns as u64),
+        width(total.tokens.input),
+        width(total.tokens.output),
+        width(total.tokens.reasoning),
+    );
+
+    let row = |label: String, usage: &Usage| {
+        format!(
+            "  {label} {}\n",
+            paint(
+                Style::Dim,
+                format!(
+                    "{:>turns$} turns   {:>input$} in   {:>output$} out   \
+                     {:>reasoning$} reasoning   ${:.4}",
+                    usage.turns,
+                    usage.tokens.input,
+                    usage.tokens.output,
+                    usage.tokens.reasoning,
+                    usage.cost,
+                )
             )
         )
-    );
+    };
+
+    let mut out = format!("\n{}\n", paint(Style::Heading, "Usage"));
+    for side in [Side::A, Side::B] {
+        out.push_str(&row(
+            paint(Style::for_side(side), side.to_string()),
+            &state.usage_for(side),
+        ));
+    }
+    out.push_str(&row(paint(Style::Value, "="), &total));
+    out
 }
 
 /// Parse a `provider/model` argument into a reference.
@@ -687,6 +731,78 @@ async fn probe(message: String, model: Option<ModelRef>, websearch: bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A debate whose two sides spent very different amounts, which is the
+    /// case the per-side breakdown exists for.
+    fn lopsided_debate() -> DebateState {
+        use coin::debate::state::{ParseStatus, TurnAnalysis};
+        use coin::opencode::types::Tokens;
+
+        let mut state = DebateState::new(Topic::new("q", "a", "b"), 3);
+        for (side, input, output, reasoning, cost) in [
+            (Side::A, 48_213_u64, 1_204_u64, 3_991_u64, 0.004_12_f64),
+            (Side::B, 6_002, 890, 0, 0.000_71),
+            (Side::A, 51_770, 1_130, 4_402, 0.004_55),
+            (Side::B, 7_310, 902, 0, 0.000_80),
+        ] {
+            state.push_turn(
+                side,
+                "argument".into(),
+                TurnAnalysis::empty(ParseStatus::Ok),
+                Vec::new(),
+                Tokens {
+                    input,
+                    output,
+                    reasoning,
+                },
+                cost,
+            );
+        }
+        state
+    }
+
+    #[test]
+    fn usage_columns_line_up_across_rows() {
+        // Arrange: side A spends an order of magnitude more than side B, so
+        // the narrow row must be padded to the width of the total.
+        let state = lopsided_debate();
+
+        // Act
+        let block = format_usage(&state);
+
+        // Assert: 99983 is A's input, 13312 is B's, 113295 the total. The two
+        // shorter numbers carry leading spaces so all three end in the same
+        // column. Tests run without a terminal, so no styling is present.
+        assert!(block.contains(" 99983 in"), "block was:\n{block}");
+        assert!(block.contains("  13312 in"), "block was:\n{block}");
+        assert!(block.contains("113295 in"), "block was:\n{block}");
+
+        let widths: Vec<usize> = block
+            .lines()
+            .filter(|line| line.contains(" turns   "))
+            .map(str::len)
+            .collect();
+        assert_eq!(widths.len(), 3, "expected two sides and a total");
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "rows are ragged: {widths:?} in\n{block}"
+        );
+    }
+
+    #[test]
+    fn usage_separates_reasoning_from_output() {
+        // Arrange: only side A reports thinking tokens.
+        let state = lopsided_debate();
+
+        // Act
+        let block = format_usage(&state);
+
+        // Assert: 8393 reasoning against 4126 output, kept apart because a
+        // model that reports them bills them separately.
+        assert!(block.contains("8393 reasoning"), "block was:\n{block}");
+        assert!(block.contains("4126 out"), "block was:\n{block}");
+        assert!(block.contains("$0.0102"), "block was:\n{block}");
+    }
 
     /// Parse a `provider/model` string in a test.
     fn model(value: &str) -> ModelRef {

@@ -159,6 +159,31 @@ produced a result is exactly what a reader needs months later.
 JSON, anything else selects Markdown, and missing parent directories are
 created.
 
+### 2.2a What a debate spent is part of the result
+
+A debate spends real money, so the closing summary and `transcript.md` both end
+with a usage table, and `transcript.json` carries the same figures per turn.
+
+```
+Usage
+  A 2 turns    99983 in   2334 out   8393 reasoning   $0.0087
+  B 2 turns    13312 in   1792 out      0 reasoning   $0.0015
+  = 4 turns   113295 in   4126 out   8393 reasoning   $0.0102
+```
+
+**The sides are broken out** rather than only totalled. They can run different
+models, and a single figure hides which of them the money went to, which is the
+first thing a reader wants when the sides differ. It also shows plainly when
+one side is doing far more work than the other.
+
+**Reasoning is its own column**, never folded into output. A model that reports
+thinking tokens bills them separately, so adding them to the output count would
+misstate both, and a debate that spent most of its budget thinking rather than
+arguing should be visible as such.
+
+Columns are sized from the total row, which is always the widest, so figures
+line up without a fixed width that a long debate would overflow.
+
 ### 2.3 Command line rendering
 
 A debate streams two voices into one terminal, so the sides are coloured

@@ -291,6 +291,43 @@ pub struct Turn {
     pub cost: f64,
 }
 
+/// Token and cost accounting over a set of turns.
+///
+/// A debate spends real money, so what it spent is part of the result rather
+/// than a diagnostic. Reasoning tokens are carried separately from output
+/// because models that report them bill them separately, and folding them into
+/// the output count would understate what a thinking model produced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct Usage {
+    /// Turns counted.
+    pub turns: usize,
+    /// Tokens consumed across them.
+    pub tokens: Tokens,
+    /// Cost in USD across them.
+    pub cost: f64,
+}
+
+/// Sum turns into a [`Usage`].
+///
+/// Rust note for Python developers: implementing `FromIterator` is what lets
+/// any iterator of turns end in `.collect()`, so the total and the per-side
+/// figures share one summing rule instead of repeating it.
+impl<'a> FromIterator<&'a Turn> for Usage {
+    fn from_iter<I>(turns: I) -> Self
+    where
+        I: IntoIterator<Item = &'a Turn>,
+    {
+        turns.into_iter().fold(Self::default(), |mut total, turn| {
+            total.turns += 1;
+            total.tokens.input += turn.tokens.input;
+            total.tokens.output += turn.tokens.output;
+            total.tokens.reasoning += turn.tokens.reasoning;
+            total.cost += turn.cost;
+            total
+        })
+    }
+}
+
 /// One row of the convergence table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CredenceRound {
@@ -498,21 +535,26 @@ impl DebateState {
             .count()
     }
 
-    /// Total cost across every turn, in USD.
-    pub fn total_cost(&self) -> f64 {
-        self.turns.iter().map(|turn| turn.cost).sum()
+    /// Accounting across every turn.
+    pub fn usage(&self) -> Usage {
+        self.turns.iter().collect()
     }
 
-    /// Total tokens across every turn.
-    pub fn total_tokens(&self) -> Tokens {
-        self.turns
-            .iter()
-            .fold(Tokens::default(), |mut total, turn| {
-                total.input += turn.tokens.input;
-                total.output += turn.tokens.output;
-                total.reasoning += turn.tokens.reasoning;
-                total
-            })
+    /// Accounting for the turns one side took.
+    ///
+    /// Worth separating because the two sides can run different models. A
+    /// single total hides which of them the money went to, which is exactly
+    /// what a reader wants to know when the sides differ.
+    ///
+    /// # Arguments
+    ///
+    /// * `side` - The side to account for
+    ///
+    /// # Returns
+    ///
+    /// That side's turn count, tokens, and cost.
+    pub fn usage_for(&self, side: Side) -> Usage {
+        self.turns.iter().filter(|turn| turn.side == side).collect()
     }
 
     /// Record a completed turn.
@@ -790,8 +832,63 @@ mod tests {
         // Arrange: four turns at a tenth of a cent each.
         let state = state_with_credences(&[Some(80), Some(20), Some(70), Some(35)]);
 
+        // Act
+        let usage = state.usage();
+
         // Act and assert
-        assert!((state.total_cost() - 0.004).abs() < 1e-9);
+        assert_eq!(usage.turns, 4);
+        assert!((usage.cost - 0.004).abs() < 1e-9);
+    }
+
+    #[test]
+    fn usage_splits_by_side() {
+        // Arrange: turns alternate from A, so four turns is two each.
+        let state = state_with_credences(&[Some(80), Some(20), Some(70), Some(35)]);
+
+        // Act
+        let (a, b) = (state.usage_for(Side::A), state.usage_for(Side::B));
+
+        // Assert: the halves must account for the whole, or the split is
+        // dropping or double counting turns.
+        assert_eq!(a.turns, 2);
+        assert_eq!(b.turns, 2);
+        assert!((a.cost + b.cost - state.usage().cost).abs() < 1e-9);
+    }
+
+    #[test]
+    fn usage_of_a_debate_with_no_turns_is_zero() {
+        // Arrange: a debate that failed before either side spoke.
+        let state = DebateState::new(Topic::new("q", "a", "b"), 3);
+
+        // Act and assert
+        assert_eq!(state.usage(), Usage::default());
+        assert_eq!(state.usage_for(Side::A).turns, 0);
+    }
+
+    #[test]
+    fn reasoning_tokens_are_counted_separately_from_output() {
+        // Arrange: a thinking model bills reasoning apart from output, so
+        // folding the two together would understate what it produced.
+        let mut state = DebateState::new(Topic::new("q", "a", "b"), 3);
+        state.push_turn(
+            Side::A,
+            "argument".into(),
+            TurnAnalysis::empty(ParseStatus::Ok),
+            Vec::new(),
+            Tokens {
+                input: 100,
+                output: 20,
+                reasoning: 500,
+            },
+            0.001,
+        );
+
+        // Act
+        let usage = state.usage();
+
+        // Assert
+        assert_eq!(usage.tokens.output, 20);
+        assert_eq!(usage.tokens.reasoning, 500);
     }
 
     #[test]
